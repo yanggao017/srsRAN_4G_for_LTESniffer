@@ -91,7 +91,3 @@ add_test(task_scheduler_test task_scheduler_test)
 
 add_executable(mac_pcap_net_test mac_pcap_net_test.cc)
 target_link_libraries(mac_pcap_net_test srsran_common ${SCTP_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
-
-
-add_executable(gen_sample gen_sample.cc log.cc)
-target_link_libraries(gen_sample srsran_pdcp srsran_rlc srsran_mac srsran_phy srsran_common rrc_asn1 srsran_asn1 ${CMAKE_THREAD_LIBS_INIT})
