@@ -73,10 +73,10 @@ inline std::string to_string(const rlc_am_nr_sn_size_t& sn_size)
   constexpr static const char* options[] = {"12 bits", "18 bits"};
   return enum_to_text(options, (uint32_t)rlc_mode_t::nulltype, (uint32_t)sn_size);
 }
-constexpr uint16_t to_number(const rlc_am_nr_sn_size_t& sn_size)
+constexpr uint16_t to_number(rlc_am_nr_sn_size_t sn_size)
 {
-  constexpr uint16_t options[] = {12, 18};
-  return enum_to_number(options, (uint32_t)rlc_mode_t::nulltype, (uint32_t)sn_size);
+    return (sn_size == rlc_am_nr_sn_size_t::size12bits) ? 12 :
+           (sn_size == rlc_am_nr_sn_size_t::size18bits) ? 18 : 0;
 }
 /**
  * @brief Value range of the serial numbers
