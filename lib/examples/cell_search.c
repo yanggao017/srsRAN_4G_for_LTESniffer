@@ -66,18 +66,6 @@ struct cells results[1024];
 float rf_gain = 70.0;
 char* rf_args = "";
 char* rf_dev  = "";
-int common_lte_fdd_bands[] = {
-  1,   // 2100 MHz, 全球通用
-  3,   // 1800 MHz, 中国/欧洲主流
-  7,   // 2600 MHz, 高容量
-  8,   // 900 MHz, 覆盖好
-  20,  // 800 MHz, 欧洲/中国移动 FDD 补盲
-  28,  // 700 MHz, 电信+广电，黄金频段
-  5,   // 850 MHz, 中国电信
-  4,   // AWS 1700/2100, 北美
-  12,  // 700 MHz 下行, 北美
-};
-#define NUM_FDD_BANDS (sizeof(common_lte_fdd_bands) / sizeof(common_lte_fdd_bands[0]))
 
 void usage(char* prog)
 {
@@ -125,10 +113,10 @@ void parse_args(int argc, char** argv)
         exit(-1);
     }
   }
-  /*if (band == -1) {
+  if (band == -1) {
     usage(argv[0]);
     exit(-1);
-  }*/
+  }
 }
 
 int srsran_rf_recv_wrapper(void* h, void* data, uint32_t nsamples, srsran_timestamp_t* t)
@@ -187,7 +175,11 @@ int main(int argc, char** argv)
   // Supress RF messages
   srsran_rf_suppress_stdout(&rf);
 
-  
+  nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, MAX_EARFCN);
+  if (nof_freqs < 0) {
+    ERROR("Error getting EARFCN list");
+    exit(-1);
+  }
 
   sigset_t sigset;
   sigemptyset(&sigset);
@@ -211,58 +203,50 @@ int main(int argc, char** argv)
                              rf_info->max_rx_gain,
                              cell_detect_config.init_agc);
   }
-  for (int band_idx = 0; band_idx < NUM_FDD_BANDS; band_idx++) {
-    band = common_lte_fdd_bands[band_idx];
 
-    nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, MAX_EARFCN);
-    if (nof_freqs < 0) {
-      ERROR("Error getting EARFCN list");
-      exit(-1);
+  for (freq = 0; freq < nof_freqs && !go_exit; freq++) {
+    /* set rf_freq */
+    srsran_rf_set_rx_freq(&rf, 0, (double)channels[freq].fd * MHZ);
+    INFO("Set rf_freq to %.3f MHz", (double)channels[freq].fd * MHZ / 1000000);
+
+    printf(
+        "[%3d/%d]: EARFCN %d Freq. %.2f MHz looking for PSS.\n", freq, nof_freqs, channels[freq].id, channels[freq].fd);
+    fflush(stdout);
+
+    if (SRSRAN_VERBOSE_ISINFO()) {
+      printf("\n");
     }
-    for (freq = 0; freq < nof_freqs && !go_exit; freq++) {
-      /* set rf_freq */
-      srsran_rf_set_rx_freq(&rf, 0, (double)channels[freq].fd * MHZ);
-      INFO("Set rf_freq to %.3f MHz", (double)channels[freq].fd * MHZ / 1000000);
 
-      printf(
-          "[%d/%ld] 正在处理 Band %d [%3d/%d]: EARFCN %d Freq. %.2f MHz looking for PSS.\n", band_idx + 1, NUM_FDD_BANDS, band, freq, nof_freqs, channels[freq].id, channels[freq].fd);
-      fflush(stdout);
+    bzero(found_cells, 3 * sizeof(srsran_ue_cellsearch_result_t));
 
-      if (SRSRAN_VERBOSE_ISINFO()) {
-        printf("\n");
-      }
+    INFO("Setting sampling frequency %.2f MHz for PSS search", SRSRAN_CS_SAMP_FREQ / 1000000);
+    srsran_rf_set_rx_srate(&rf, SRSRAN_CS_SAMP_FREQ);
+    INFO("Starting receiver...");
+    srsran_rf_start_rx_stream(&rf, false);
 
-      bzero(found_cells, 3 * sizeof(srsran_ue_cellsearch_result_t));
-
-      INFO("Setting sampling frequency %.2f MHz for PSS search", SRSRAN_CS_SAMP_FREQ / 1000000);
-      srsran_rf_set_rx_srate(&rf, SRSRAN_CS_SAMP_FREQ);
-      INFO("Starting receiver...");
-      srsran_rf_start_rx_stream(&rf, false);
-
-      n = srsran_ue_cellsearch_scan(&cs, found_cells, NULL);
-      if (n < 0) {
-        ERROR("Error searching cell");
-        exit(-1);
-      } else if (n > 0) {
-        for (int i = 0; i < 3; i++) {
-          if (found_cells[i].psr > 2.0) {
-            srsran_cell_t cell;
-            cell.id = found_cells[i].cell_id;
-            cell.cp = found_cells[i].cp;
-            int ret = rf_mib_decoder(&rf, 1, &cell_detect_config, &cell, NULL);
-            if (ret < 0) {
-              ERROR("Error decoding MIB");
-              exit(-1);
-            }
-            if (ret == SRSRAN_UE_MIB_FOUND) {
-              printf("Found CELL ID %d. %d PRB, %d ports\n", cell.id, cell.nof_prb, cell.nof_ports);
-              if (cell.nof_ports > 0) {
-                results[n_found_cells].cell      = cell;
-                results[n_found_cells].freq      = channels[freq].fd;
-                results[n_found_cells].dl_earfcn = channels[freq].id;
-                results[n_found_cells].power     = found_cells[i].peak;
-                n_found_cells++;
-              }
+    n = srsran_ue_cellsearch_scan(&cs, found_cells, NULL);
+    if (n < 0) {
+      ERROR("Error searching cell");
+      exit(-1);
+    } else if (n > 0) {
+      for (int i = 0; i < 3; i++) {
+        if (found_cells[i].psr > 2.0) {
+          srsran_cell_t cell;
+          cell.id = found_cells[i].cell_id;
+          cell.cp = found_cells[i].cp;
+          int ret = rf_mib_decoder(&rf, 1, &cell_detect_config, &cell, NULL);
+          if (ret < 0) {
+            ERROR("Error decoding MIB");
+            exit(-1);
+          }
+          if (ret == SRSRAN_UE_MIB_FOUND) {
+            printf("Found CELL ID %d. %d PRB, %d ports\n", cell.id, cell.nof_prb, cell.nof_ports);
+            if (cell.nof_ports > 0) {
+              results[n_found_cells].cell      = cell;
+              results[n_found_cells].freq      = channels[freq].fd;
+              results[n_found_cells].dl_earfcn = channels[freq].id;
+              results[n_found_cells].power     = found_cells[i].peak;
+              n_found_cells++;
             }
           }
         }

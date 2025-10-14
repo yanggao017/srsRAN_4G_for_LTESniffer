@@ -1,0 +1,4 @@
+./lte_tool scan --band 1
+./lte_tool scan --band 1 --force
+./lte_tool gen-sib1-tac -c 420
+sudo ./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type sib1_tac
