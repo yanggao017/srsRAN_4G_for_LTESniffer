@@ -1,0 +1,9 @@
+{
+  "Type": "FDD",
+  "PCI": 420,
+  "Nof ports": 2,
+  "CP": "Normal  ",
+  "PRB": 100,
+  "PHICH Length": "normal",
+  "PHICH Resources": 2
+}
