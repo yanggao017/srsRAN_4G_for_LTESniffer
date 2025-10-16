@@ -394,7 +394,7 @@ srsran_netsink_t net_sink, net_sink_signal;
   prev_nof_lines = this_nof_lines
 #define PRINT_LINE_ADVANCE_CURSOR() printf("\033[%dB", prev_nof_lines + 1)
 
-void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS], int rx_tti);
+void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS]);
 void save_mib_and_cell_info(
   const uint8_t*       bch_payload,    // 24 字节原始 MIB payload
   const srsran_cell_t& cell);          // 小区配置（不含 SFN）
@@ -903,6 +903,59 @@ int main(int argc, char** argv)
               rsrp1 = 0;
             }
           }
+
+          // Plot and Printf
+          if (sf_idx == 5) {
+            float gain = prog_args.rf_gain;
+            if (gain < 0) {
+              gain = srsran_convert_power_to_dB(srsran_agc_get_gain(&ue_sync.agc));
+            }
+
+            /* Print transmission scheme */
+
+            /* Print basic Parameters */
+            PRINT_LINE("          CFO: %+7.2f Hz", srsran_ue_sync_get_cfo(&ue_sync));
+            PRINT_LINE("         RSRP: %+5.1f dBm | %+5.1f dBm", rsrp0, rsrp1);
+            PRINT_LINE("          SNR: %+5.1f dB", snr);
+            PRINT_LINE("           TM: %d", last_decoded_tm + 1);
+            PRINT_LINE(
+                "           Rb: %6.2f / %6.2f / %6.2f Mbps (net/maximum/processing)", uerate, enodebrate, procrate);
+            PRINT_LINE("   PDCCH-Miss: %5.2f%%", 100 * (1 - (float)nof_detected / nof_trials));
+            PRINT_LINE("   PDSCH-BLER: %5.2f%%", (float)100 * pkt_errors / pkt_total);
+            PRINT_LINE("   PDSCH-EVM: %5.2f%%", ue_dl.pdsch.avg_evm);
+
+            if (prog_args.mbsfn_area_id > -1) {
+              PRINT_LINE("   PMCH-BLER: %5.2f%%", (float)100 * pkt_errors / pmch_pkt_total);
+            }
+
+            PRINT_LINE("         TB 0: mcs=%d; tbs=%d", pdsch_cfg.grant.tb[0].mcs_idx, pdsch_cfg.grant.tb[0].tbs);
+            PRINT_LINE("         TB 1: mcs=%d; tbs=%d", pdsch_cfg.grant.tb[1].mcs_idx, pdsch_cfg.grant.tb[1].tbs);
+
+            /* MIMO: if tx and rx antennas are bigger than 1 */
+            if (cell.nof_ports > 1 && ue_dl.pdsch.nof_rx_antennas > 1) {
+              uint32_t ri = 0;
+              float    cn = 0;
+              /* Compute condition number */
+              if (srsran_ue_dl_select_ri(&ue_dl, &ri, &cn)) {
+                /* Condition number calculation is not supported for the number of tx & rx antennas*/
+                PRINT_LINE("            κ: NA");
+              } else {
+                /* Print condition number */
+                PRINT_LINE("            κ: %.1f dB, RI=%d (Condition number, 0 dB => Best)", cn, ri);
+              }
+              PRINT_LINE("");
+            }
+            if (chest_pdsch_cfg.sync_error_enable) {
+              for (uint32_t i = 0; i < cell.nof_ports; i++) {
+                for (uint32_t j = 0; j < prog_args.rf_nof_rx_ant; j++) {
+                  PRINT_LINE("sync_err[%d][%d]=%f", i, j, sync_err[i][j]);
+                }
+              }
+            }
+            PRINT_LINE("Press enter maximum printing debug log of 1 subframe.");
+            PRINT_LINE("");
+            PRINT_LINE_RESET_CURSOR();
+          }
           break;
       }
       if (sf_idx == 9) {
@@ -978,13 +1031,15 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
   int nof_tb = pdsch_cfg->grant.nof_tb;
 
   if (pdsch_cfg->rnti == SRSRAN_SIRNTI) {
-    //printf("Received SI message - RNTI: 0xFFFF (SI-RNTI)\n");
+    //printf("Received SI message - RNTI: 0xFFFE (SI-RNTI)\n");
 
     for (int i = 0; i < nof_tb; i++) {
       if (!pdsch_cfg->grant.tb[i].enabled) continue;
 
       int len = pdsch_cfg->grant.tb[i].tbs / 8;
-      if (len <= 0) continue;     
+      if (len <= 0) continue;
+
+      
 
       cbit_ref bref(data[i], len);
       bcch_dl_sch_msg_s bcch_msg;
@@ -999,7 +1054,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         // === 处理 SIB1 ===
         if (c1.type() == bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1) {
           if (sib1_json.empty()) {
-            printf("✅ Decoded SIB1 successfully\n");
+            //printf("✅ Decoded SIB1 successfully\n");
 
             // 保存 JSON
             json_writer js;

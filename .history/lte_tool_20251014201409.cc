@@ -399,8 +399,9 @@ int handle_over_msg(int argc, char* argv[]) {
     args.push_back("-x");
     args.push_back("1");
     args.push_back("-a");
-    args.push_back("type=x300,time_source=gpsdo");
-    //args.push_back("type=b200,clock=external,master_clock=30.72e6,serial=3332A71");
+    //args.push_back("type=x300,time_source=gpsdo");
+    args.push_back("type=b200,clock=external,master_clock=30.72e6,serial=3332A71");
+
     args.push_back("-g");
     args.push_back("70");
     args.push_back("-c");

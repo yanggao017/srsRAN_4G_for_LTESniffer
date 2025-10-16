@@ -978,13 +978,15 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
   int nof_tb = pdsch_cfg->grant.nof_tb;
 
   if (pdsch_cfg->rnti == SRSRAN_SIRNTI) {
-    //printf("Received SI message - RNTI: 0xFFFF (SI-RNTI)\n");
+    //printf("Received SI message - RNTI: 0xFFFE (SI-RNTI)\n");
 
     for (int i = 0; i < nof_tb; i++) {
       if (!pdsch_cfg->grant.tb[i].enabled) continue;
 
       int len = pdsch_cfg->grant.tb[i].tbs / 8;
-      if (len <= 0) continue;     
+      if (len <= 0) continue;
+
+      
 
       cbit_ref bref(data[i], len);
       bcch_dl_sch_msg_s bcch_msg;
@@ -999,7 +1001,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         // === 处理 SIB1 ===
         if (c1.type() == bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1) {
           if (sib1_json.empty()) {
-            printf("✅ Decoded SIB1 successfully\n");
+            //printf("✅ Decoded SIB1 successfully\n");
 
             // 保存 JSON
             json_writer js;

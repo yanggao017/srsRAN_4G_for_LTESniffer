@@ -274,15 +274,16 @@ int main(int argc, char** argv) {
   INFO("eNb PDSCH: rnti=0x%x, %s", rnti, str);
 
   srsran_enb_dl_gen_signal(enb_dl);
-
   uint32_t zero_padding_len = SRSRAN_SF_LEN_PRB(cell.nof_prb)/10;
   snprintf(outputfile, sizeof(outputfile), "%s/%s_sf%d.fc32", output_dir, attack_types[attack_type].name, tti);
   fp = fopen(outputfile, "wb");
-  /*
   fwrite(zero_buff, zero_padding_len * sizeof(cf_t), 1, fp);
   fwrite(signal_buffer[0], SRSRAN_SF_LEN_PRB(cell.nof_prb) * sizeof(cf_t), 1, fp);
   fwrite(zero_buff, zero_padding_len * sizeof(cf_t), 1, fp); 
-  fclose(fp);*/  
+  fclose(fp);
+ 
+  /*
+//测试的写入文件:填充的0合入数组后写入
   cf_t* temp_buffer[SRSRAN_MAX_PORTS] = {NULL};
   for (uint32_t i = 0; i < SRSRAN_MAX_PORTS; i++) {
     temp_buffer[i] = srsran_vec_cf_malloc(SRSRAN_SF_LEN_MAX + zero_padding_len *2);
@@ -297,16 +298,8 @@ int main(int argc, char** argv) {
   memcpy(temp_buffer[0] + zero_padding_len + signal_length, zero_buff, zero_padding_len * sizeof(cf_t));
   fwrite(temp_buffer[0], (SRSRAN_SF_LEN_MAX + zero_padding_len *2) * sizeof(cf_t), 1, fp);
   fclose(fp);
-  printf("[OK] Generate target msg signal file: %s\n", outputfile);
-
-  int elsesignal_len = (1 - 0.3 - 0.1) * SRSRAN_SF_LEN_MAX;
-  printf("elsesignal_len:%d\n", elsesignal_len);
-  snprintf(outputfile, sizeof(outputfile), "%s/%s_else.fc32", output_dir, attack_types[attack_type].name);
-  fp = fopen(outputfile, "wb");
-  fwrite(signal_buffer[0], elsesignal_len * sizeof(cf_t), 1, fp);
-  fclose(fp);
-  printf("[OK]  Generate else signal file: %s\n", outputfile);
-
+*/
+  printf("[OK] OUTPUT: %s\n", outputfile);
   srsran_enb_dl_free(enb_dl);
   for (uint32_t i = 0; i < cell.nof_ports; i++) {
     if (signal_buffer[i]) {
