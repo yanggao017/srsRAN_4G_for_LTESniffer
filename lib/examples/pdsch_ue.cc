@@ -1082,11 +1082,19 @@ void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cel
   std::string mib_json_str = js_mib.to_string();
   save_to_output("mib.json", mib_json_str);
 
-  // --- 3. 保存 Cell JSON ---
+  int  ul_earfcn = 0;
+  double ul_freq_hz;
+  ul_earfcn = srsran_band_ul_earfcn(prog_args.dl_earfcn);
+  ul_freq_hz = 1e6 * srsran_band_fu(ul_earfcn);
+  if (ul_freq_hz == 0.0) {
+    printf("[ERROR] Couldn't derive UL frequency for EARFCN=%d\n", ul_earfcn);
+  }
   asn1::json_writer js_cell;
-  js_cell.start_obj();  // ✅ 不是 start_object()
+  js_cell.start_obj();
   js_cell.write_int("DL Freq", prog_args.rf_freq);
   js_cell.write_int("DL Earfcn", prog_args.dl_earfcn);
+  js_cell.write_int("UL Freq", ul_freq_hz);
+  js_cell.write_int("UL Earfcn", ul_earfcn);
   js_cell.write_str("Type", cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD");
   js_cell.write_int("PCI", cell.id);
   js_cell.write_int("Nof Ports", cell.nof_ports);
