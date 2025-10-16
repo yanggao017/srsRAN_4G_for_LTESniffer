@@ -694,16 +694,3 @@ endif(ENABLE_SRSEPC)
 
 add_subdirectory(test)
 
-
-########################################################################
-# Build lte_tool (yg's custom tool)
-########################################################################
-if (ENABLE_APPS)
-    find_package(Boost REQUIRED COMPONENTS system filesystem)
-
-    add_executable(lte_tool lte_tool.cc)
-    target_link_libraries(lte_tool
-   
-    ${Boost_LIBRARIES}
-    )
-endif()
