@@ -1,25 +1,28 @@
-srsRAN
-======
+# srsRAN_4G
+## for testing
+```
+mkdir build && cd build
+cmake ../
+make -j18
+```
 
-[![Build Status](https://github.com/srsran/srsRAN_4G/actions/workflows/ccpp.yml/badge.svg?branch=master)](https://github.com/srsran/srsRAN_4G/actions/workflows/ccpp.yml)
-[![CodeQL](https://github.com/srsran/srsRAN_4G/actions/workflows/codeql.yml/badge.svg?branch=master)](https://github.com/srsran/srsRAN_4G/actions/workflows/codeql.yml)
-[![Coverity](https://scan.coverity.com/projects/28268/badge.svg)](https://scan.coverity.com/projects/srsran_4g_agpl)
 
-srsRAN is an open source 4G software radio suite developed by [SRS](http://www.srs.io). For 5G RAN, see our new O-RAN CU/DU solution - [srsRAN Project](https://www.github.com/srsran/srsran_project).
-
-See the [srsRAN 4G project pages](https://www.srsran.com) for information, guides and project news.
-
-The srsRAN suite includes:
-  * srsUE - a full-stack SDR 4G UE application with prototype 5G features
-  * srsENB - a full-stack SDR 4G eNodeB application
-  * srsEPC - a light-weight 4G core network implementation with MME, HSS and S/P-GW
-
-For application features, build instructions and user guides see the [srsRAN 4G documentation](https://docs.srsran.com/projects/4g/).
-
-For license details, see LICENSE file.
-
-Support
-=======
-
-Mailing list: https://lists.srsran.com/mailman/listinfo/srsran-users
-
+```./lib/examples/cell_search -b 1 -a type=x300,time_source=gpsdo -s 94 -e 104
+./lib/examples/pdsch_ue -f 2120e6 -d -E 100
+mkdir cache && mkdir cache/band_1 && mkdir cache/band_1/cell_420
+cp ../output/* cache/band_1/cell_420/
+./lib/test/common/gen_sample --type sib1_tac -c 420
+./lib/test/common/gen_sample --type sib2_acbarring -c 420
+./lib/test/common/gen_sample --type paging_sysinfmod -c 420
+./lib/test/common/gen_sample --type paging_imsi -c 420 -m 460017837217696
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type sib1_tac
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type sib2_acbarring
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type paging_imsi
+```
+## for LTESniffer
+```
+cd LTESniffer
+mkdir build && cd build
+cmake .. -DENABLE_APPS=ON
+make -j18
+```

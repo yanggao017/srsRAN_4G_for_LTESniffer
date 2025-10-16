@@ -1,7 +1,8 @@
 {
   "DL Freq": 2120000000,
   "DL Earfcn": 100,
-  "UL Freq": 18100,
+  "UL Freq": 1930000000,
+  "UL Earfcn": 18100,
   "Type": "FDD",
   "PCI": 420,
   "Nof Ports": 2,

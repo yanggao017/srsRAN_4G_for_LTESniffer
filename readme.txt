@@ -1,4 +1,0 @@
-./lte_tool scan --band 1
-./lte_tool scan --band 1 --force
-./lte_tool gen-sib1-tac -c 420
-./lte_tool over-sib1-tac -c 420
