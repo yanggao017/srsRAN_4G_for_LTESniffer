@@ -1450,9 +1450,9 @@ int read_cell_config_from_json() {
         }
         cell.id = (uint32_t)item->valuedouble;
 
-        item = cJSON_GetObjectItem(json, "Nof ports");
+        item = cJSON_GetObjectItem(json, "Nof Ports");
         if (!item || !cJSON_IsNumber(item)) {
-            fprintf(stderr, "[ERROR] Missing or invalid 'Nof ports' field\n");
+            fprintf(stderr, "[ERROR] Missing or invalid 'Nof Ports' field\n");
             break;
         }
         cell.nof_ports = (uint32_t)item->valuedouble;

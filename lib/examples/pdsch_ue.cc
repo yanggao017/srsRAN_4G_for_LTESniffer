@@ -71,12 +71,6 @@ cell_search_cfg_t cell_detect_config = {.max_frames_pbch      = SRSRAN_DEFAULT_M
 
 #define ENABLE_AGC_DEFAULT
 #define MAX_SRATE_DELTA 2
-
-
-
-//#define STDOUT_COMPACT
-
-
 const char* output_file_name;
 //#define PRINT_CHANGE_SCHEDULING
 
@@ -120,6 +114,7 @@ typedef struct {
   int      verbose;
   bool     enable_256qam;
   bool     use_standard_lte_rate;
+  int dl_earfcn;
 } prog_args_t;
 
 void args_default(prog_args_t* args)
@@ -164,7 +159,7 @@ void args_default(prog_args_t* args)
 
 void usage(prog_args_t* args, char* prog)
 {
-  printf("Usage: %s [adgpPoOcildFRDnruMNvTG] -f rx_frequency (in Hz) | -i input_file\n", prog);
+  printf("Usage: %s [EadgpPoOcildFRDnruMNvTG] -f rx_frequency (in Hz) | -i input_file\n", prog);
 #ifndef DISABLE_RF
   printf("\t-I RF dev [Default %s]\n", args->rf_dev);
   printf("\t-a RF args [Default %s]\n", args->rf_args);
@@ -210,8 +205,11 @@ void parse_args(prog_args_t* args, int argc, char** argv)
   int opt;
   args_default(args);
 
-  while ((opt = getopt(argc, argv, "adAogliIpPcOCtdDFRqnvrfuUsSZyWMNBTGQ")) != -1) {
+  while ((opt = getopt(argc, argv, "EadAogliIpPcOCtdDFRqnvrfuUsSZyWMNBTGQ")) != -1) {
     switch (opt) {
+      case 'E':
+        args->dl_earfcn = (int)strtol(argv[optind], NULL, 10);
+        break;
       case 'i':
         args->input_file_name = argv[optind];
         break;
@@ -1038,7 +1036,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
           }
         }
 
-        if (!sib1_json.empty() && !sib2_json.empty() && false) {
+        if (!sib1_json.empty() && !sib2_json.empty()) {
           printf("\n[OK] Both SIB1 and SIB2 captured! Writing all files once and exiting...\n");
           save_to_output("sib1.json", sib1_json);
           save_to_output("sib2.json", sib2_json);
@@ -1088,9 +1086,10 @@ void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cel
   asn1::json_writer js_cell;
   js_cell.start_obj();  // ✅ 不是 start_object()
   js_cell.write_int("DL Freq", prog_args.rf_freq);
+  js_cell.write_int("DL Earfcn", prog_args.dl_earfcn);
   js_cell.write_str("Type", cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD");
   js_cell.write_int("PCI", cell.id);
-  js_cell.write_int("Nof ports", cell.nof_ports);
+  js_cell.write_int("Nof Ports", cell.nof_ports);
   js_cell.write_str("CP", srsran_cp_string(cell.cp));
   js_cell.write_int("PRB", cell.nof_prb);
 

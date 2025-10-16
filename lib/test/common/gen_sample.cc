@@ -95,6 +95,7 @@ void usage(const char *prog) {
   printf("  Paging with IMSI:       %s --type paging_imsi -m 460017837217696\n", prog);
   printf("  Attach Reject:          %s --type attach_reject -r 0x46 -s 5 -o out_rej -p 100 -c 420\n", prog);
 }
+
 static const char* optstring = "c:f:p:s:r:o:m:i:hv";
 static struct option long_options[] = {
     {"type", required_argument, 0, 'T'},
@@ -162,6 +163,8 @@ void parse_args(int argc, char **argv) {
     exit(-1);
   }
 }
+
+
 int main(int argc, char** argv) {
   parse_args(argc,argv);
   srsran_use_standard_symbol_size(true); 
@@ -476,7 +479,7 @@ int read_cell_config_from_json() {
       std::string type = j.at("Type").get<std::string>();
       cell.frame_type = (type == "FDD") ? SRSRAN_FDD : SRSRAN_TDD;
       cell.id = j.at("PCI").get<uint32_t>();
-      cell.nof_ports = j.at("Nof ports").get<uint32_t>();
+      cell.nof_ports = j.at("Nof Ports").get<uint32_t>();
       std::string cp = j.at("CP").get<std::string>();
       cell.cp = (cp.find("Normal") != std::string::npos) ? SRSRAN_CP_NORM : SRSRAN_CP_EXT;
       cell.nof_prb = j.at("PRB").get<uint32_t>();

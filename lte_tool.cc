@@ -190,6 +190,7 @@ int handle_scan(int argc, char* argv[]) {
     for (const auto& cell : cells) {
         int pci = cell["PCI"];
         double freq_mhz = cell["DL Freq"];
+        int dl_earfcn = cell["EARFCN"];
         std::string cell_dir = cache_dir + "/cell_" + std::to_string(pci);
         create_dir(cell_dir);
         std::string config_json = cell_dir + "/config.json";
@@ -199,7 +200,7 @@ int handle_scan(int argc, char* argv[]) {
         }
         std::cout << "[RUN] ===> Testing cell PCI=" << pci << " at " << freq_mhz << " MHz (timeout: " << TIMEOUT_SEC << "s)...\n";
         clear_output_dir();
-        std::string pdsch_cmd = TIMEOUT_CMD + "./lib/examples/pdsch_ue -f " + std::to_string(freq_mhz * 1e6) + " -d";
+        std::string pdsch_cmd = TIMEOUT_CMD + "./lib/examples/pdsch_ue -f " + std::to_string(freq_mhz * 1e6) + " -d -E " + std::to_string(dl_earfcn);
         int ret = std::system((pdsch_cmd + " > /dev/null 2>&1").c_str());
         bool mib_decoded = file_exists("../output/mib.json");
         if (mib_decoded) {
