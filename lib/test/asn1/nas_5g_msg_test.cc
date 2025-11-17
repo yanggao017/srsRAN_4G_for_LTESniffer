@@ -30,7 +30,7 @@
 
 using namespace srsran::nas_5g;
 
-#define HAVE_PCAP 0
+#define HAVE_PCAP 1
 
 inline void print_msg(const srsran::unique_byte_buffer_t& msg)
 {

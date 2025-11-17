@@ -225,7 +225,12 @@ bool s1ap::s1ap_tx_pdu(const asn1::s1ap::s1ap_pdu_c& pdu, struct sctp_sndrcvinfo
   if (m_pcap_enable) {
     m_pcap.write_s1ap(buf->msg, buf->N_bytes);
   }
-
+  //test yg print
+  printf("S1AP Message (%d bytes) 3: ", buf->N_bytes);
+    for (uint32_t i = 0; i < buf->N_bytes; ++i) {
+    printf("%02x ", buf->msg[i]);
+  }
+  printf("\n");
   return true;
 }
 
@@ -235,7 +240,12 @@ void s1ap::handle_s1ap_rx_pdu(srsran::byte_buffer_t* pdu, struct sctp_sndrcvinfo
   if (m_pcap_enable) {
     m_pcap.write_s1ap(pdu->msg, pdu->N_bytes);
   }
-
+  //test yg print
+  printf("S1AP Message (%d bytes)4 : ", pdu->N_bytes);
+    for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
   // Get PDU type
   s1ap_pdu_t     rx_pdu;
   asn1::cbit_ref bref(pdu->msg, pdu->N_bytes);

@@ -676,11 +676,12 @@ static int srsran_pdsch_codeword_decode(srsran_pdsch_t*     q,
   int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
   if (softbuffer && data && ack && cfg->grant.tb[tb_idx].nof_bits && cfg->grant.nof_re) {
-    INFO("Decoding PDSCH SF: %d (CW%d -> TB%d), Mod %s, NofBits: %d, NofSymbols: %d, NofBitsE: %d, rv_idx: %d",
+    INFO("Decoding PDSCH SF: %d (CW%d -> TB%d), Mod %s, MCS: %d, NofBits: %d, NofSymbols: %d, NofBitsE: %d, rv_idx: %d",
          sf->tti % 10,
          codeword_idx,
          tb_idx,
          srsran_mod_string(mcs->mod),
+         mcs->mcs_idx,
          mcs->tbs,
          cfg->grant.nof_re,
          cfg->grant.tb[tb_idx].nof_bits,
@@ -977,11 +978,12 @@ static int srsran_pdsch_codeword_encode(srsran_pdsch_t*         q,
 
   if (cfg->grant.tb[tb_idx].enabled) {
     if (cfg->rnti != SRSRAN_SIRNTI) {
-      INFO("Encoding PDSCH SF: %d (TB%d -> CW%d), Mod %s, NofBits: %d, NofSymbols: %d, NofBitsE: %d, rv_idx: %d",
+      INFO("Encoding PDSCH SF: %d (TB%d -> CW%d), Mod %s, MCS: %d, NofBits: %d, NofSymbols: %d, NofBitsE: %d, rv_idx: %d",
            sf->tti % 10,
            tb_idx,
            codeword_idx,
            srsran_mod_string(mcs->mod),
+           mcs->mcs_idx,
            mcs->tbs,
            cfg->grant.nof_re,
            cfg->grant.tb[tb_idx].nof_bits,

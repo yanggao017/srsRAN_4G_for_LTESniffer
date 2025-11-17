@@ -29,3 +29,5 @@ target_link_libraries(srsgnb_rrc srsgnb_rrc_config_utils)
 include_directories(${PROJECT_SOURCE_DIR})
 
 add_subdirectory(test)
+add_executable(gen_nas_rrc_pdu gen_nas_rrc_pdu.cc)
+target_link_libraries(gen_nas_rrc_pdu srsgnb_rrc srsgnb_rrc_config_utils srsran_common rrc_nr_asn1 rrc_nr_test_helpers srsgnb_mac ${ATOMIC_LIBS})

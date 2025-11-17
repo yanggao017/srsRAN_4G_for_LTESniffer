@@ -52,7 +52,7 @@ uint8_t registration_reject[] = {
 //const char* mac_hex = "210c1fa001010a00103aa00000000061933d2623d284ab30088c9502ffe591a4";
 //dl detach request
 //const char* mac_hex = "01a000000800103a2800000000";
-const char* mac_hex = "01A000000800183A281800000000";
+const char* mac_hex = "01a000000800103a2800000000";
 void hex_string_to_byte_array(const char *hex_string, uint8_t *byte_array) {
   size_t len = strlen(hex_string);
   for (size_t i = 0; i < len; i += 2) {

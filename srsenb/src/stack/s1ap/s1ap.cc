@@ -685,7 +685,12 @@ bool s1ap::handle_s1ap_rx_pdu(srsran::byte_buffer_t* pdu)
   if (pcap != nullptr) {
     pcap->write_s1ap(pdu->msg, pdu->N_bytes);
   }
-
+  //test yg print
+  printf("S1AP Message (%d bytes) 1: ", pdu->N_bytes);
+    for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
   s1ap_pdu_c     rx_pdu;
   asn1::cbit_ref bref(pdu->msg, pdu->N_bytes);
 
@@ -2019,7 +2024,12 @@ bool s1ap::sctp_send_s1ap_pdu(const asn1::s1ap::s1ap_pdu_c& tx_pdu, uint32_t rnt
     return false;
   }
   buf->N_bytes = bref.distance_bytes();
-
+  //test yg print
+  printf("S1AP Message (%d bytes) 2: ", buf->N_bytes);
+    for (uint32_t i = 0; i < buf->N_bytes; ++i) {
+    printf("%02x ", buf->msg[i]);
+  }
+  printf("\n");
   // Save message to PCAP
   if (pcap != nullptr) {
     pcap->write_s1ap(buf->msg, buf->N_bytes);

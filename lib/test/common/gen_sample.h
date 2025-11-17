@@ -10,6 +10,7 @@
 #include "srsran/common/common.h"
 #include "srsran/common/interfaces_common.h"
 #include "srsran/common/mac_pcap.h"
+#include "srsran/asn1/liblte_mme.h"
 #include "log.h"
 using namespace asn1;
 using namespace asn1::rrc;
@@ -50,32 +51,30 @@ void my_write_data_header(uint8_t* msg, uint32_t count)
   uint8_t sn_len = 5;
   msg[0] = SN(count);
 }
-void hexdump(uint8_t* data, size_t length) {
-  for (size_t i = 0; i < length; i += 16) {
-      printf("%08zx: ", i);
-      for (size_t j = 0; j < 16 && (i + j) < length; ++j) {
-          printf("%02X ", data[i + j]);
-      }
-      printf("\n");
-  }
-  for (size_t i = 0; i < length; i += 16) {
-    printf("%08zx: ", i);
-    for (size_t j = 0; j < 16 && (i + j) < length; ++j) {
-        printf("%02X", data[i + j]);
+void hexdump(uint8_t* data, size_t length, bool print_compact = true) {
+    // 标准 hex dump
+    for (size_t i = 0; i < length; i += 16) {
+        printf("%08zx: ", i);
+        for (size_t j = 0; j < 16 && (i + j) < length; ++j) {
+            printf("%02X ", data[i + j]);
+        }
+        printf("\n");
     }
-    printf("\n");
+
+    if (print_compact) {
+        for (size_t i = 0; i < length; ++i) {
+            printf("%02X", data[i]);
+        }
+        printf("\n");
+    }
 }
-}
-int append_mac(uint8_t* buffer, size_t buffer_len, size_t current_len, const uint8_t mac[4], size_t* new_len)
+void append_mac(srsran::unique_byte_buffer_t& sdu, uint8_t* mac)
 {
-  const size_t mac_len = 4;
-  if (current_len + mac_len > buffer_len) {
-    fprintf(stderr, "Not enough space to append MAC-I\n");
-    return -1;
+  if (sdu->N_bytes + 4 > sdu->get_tailroom()) {
+    return;
   }
-  memcpy(buffer + current_len, mac, mac_len);
-  *new_len = current_len + mac_len;
-  return 0;
+  memcpy(&sdu->msg[sdu->N_bytes], mac, 4);
+  sdu->N_bytes += 4;
 }
 
 void print_rr_cfg_common(const rr_cfg_common_sib_s& rr_cfg_common) {
@@ -613,3 +612,275 @@ int gen_rar_pdu(uint32_t preamble, uint8_t* buffer, uint32_t buffer_len, uint32_
   hexdump(buffer, size_t(buffer_size));
   return 0;
 }
+
+
+void gen_pdn_connectivity_reject(LIBLTE_BYTE_MSG_STRUCT* msg)
+{
+  LIBLTE_MME_PDN_CONNECTIVITY_REJECT_MSG_STRUCT pdn_con_reject = {};
+  pdn_con_reject.eps_bearer_id                                 = 0x0;
+  pdn_con_reject.proc_transaction_id                           = 0x1;
+  pdn_con_reject.esm_cause                                     = LIBLTE_MME_ESM_CAUSE_SERVICE_OPTION_NOT_SUPPORTED;
+  
+  liblte_mme_pack_pdn_connectivity_reject_msg(&pdn_con_reject, msg);
+}
+
+void gen_attach_reject_nas_pdu(srsran::unique_byte_buffer_t& msg)
+{
+  LIBLTE_MME_ATTACH_REJECT_MSG_STRUCT attach_reject;
+  bzero(&attach_reject, sizeof(LIBLTE_MME_ATTACH_REJECT_MSG_STRUCT));
+  attach_reject.emm_cause =LIBLTE_MME_EMM_CAUSE_ILLEGAL_UE;
+  //attach_reject.emm_cause = LIBLTE_MME_EMM_CAUSE_CONGESTION;
+  printf("attach_reject.emm_cause = %d\n", attach_reject.emm_cause);
+  attach_reject.t3446_value_present = true;
+  attach_reject.t3446_value = 0x5;
+  gen_pdn_connectivity_reject(&attach_reject.esm_msg);
+  liblte_mme_pack_attach_reject_msg(&attach_reject, (LIBLTE_BYTE_MSG_STRUCT*)msg.get());
+}
+
+void uint16_to_uint8(uint16_t i, uint8_t* buf)
+{
+  buf[0] = (i >> 8) & 0xFF;
+  buf[1] = i & 0xFF;
+}
+
+void uint24_to_uint8(uint32_t i, uint8_t* buf)
+{
+  buf[0] = (i >> 16) & 0xFF;
+  buf[1] = (i >> 8) & 0xFF;
+  buf[2] = i & 0xFF;
+}
+
+using namespace srsran;
+void write_data_header(const srsran::unique_byte_buffer_t& sdu, uint32_t count)
+{
+  uint8_t hdr_len_bytes = 1;
+  uint8_t sn_len = 5;
+
+  if (hdr_len_bytes > sdu->get_headroom()) {
+    return;
+  }
+  sdu->msg -= hdr_len_bytes;
+  sdu->N_bytes += hdr_len_bytes;
+
+  switch (sn_len) {
+    case PDCP_SN_LEN_5:
+      sdu->msg[0] = SN(count); 
+      break;
+    case PDCP_SN_LEN_7:
+      sdu->msg[0] = SN(count);
+      
+
+      break;
+    case PDCP_SN_LEN_12:
+      uint16_to_uint8(SN(count), sdu->msg);
+
+      break;
+    case PDCP_SN_LEN_18:
+      uint24_to_uint8(SN(count), sdu->msg);
+      sdu->msg[0] |= 0x80; 
+      break;
+    default:
+      printf("error\n");
+  }
+}
+
+
+void gen_attach_reject_pdu_v1(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
+{
+  srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
+  gen_attach_reject_nas_pdu(nas_tx);
+  printf("NAS Message (%d bytes): ", nas_tx->N_bytes);
+  for (uint32_t i = 0; i < nas_tx->N_bytes; ++i) {
+    printf("%02x ", nas_tx->msg[i]);
+  }
+  printf("\n");
+  dl_dcch_msg_s dl_dcch_msg;
+  dl_dcch_msg.msg.set_c1();
+  dl_dcch_msg_type_c::c1_c_* msg_c1 = &dl_dcch_msg.msg.c1();
+  dl_info_transfer_r8_ies_s* dl_info_r8 =
+      &msg_c1->set_dl_info_transfer().crit_exts.set_c1().set_dl_info_transfer_r8();
+  //    msg_c1->dl_info_transfer().rrc_transaction_id = ;
+  dl_info_r8->non_crit_ext_present = false;
+  dl_info_r8->ded_info_type.set_ded_info_nas();
+  dl_info_r8->ded_info_type.ded_info_nas().resize(nas_tx->N_bytes);
+  memcpy(msg_c1->dl_info_transfer().crit_exts.c1().dl_info_transfer_r8().ded_info_type.ded_info_nas().data(),
+  nas_tx->msg,
+  nas_tx->N_bytes);
+  srsran::unique_byte_buffer_t pdu;
+  if (pdu == nullptr) {
+    pdu = srsran::make_byte_buffer();
+    if (pdu == nullptr) {
+    }
+  }
+  asn1::bit_ref bref(pdu->msg, pdu->get_tailroom());
+  if (dl_dcch_msg.pack(bref) == asn1::SRSASN_ERROR_ENCODE_FAIL) {
+    printf("Failed to encode DL-DCCH-Msg");
+  }
+  pdu->N_bytes = (uint32_t)bref.distance_bytes();
+  printf("RRC Message (%d bytes): ", pdu->N_bytes);
+    for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
+
+  write_data_header(pdu, 0);
+ printf("PDCP Message (%d bytes): ", pdu->N_bytes);
+  for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
+
+  const size_t mac_len = 4;
+  uint8_t mac[mac_len] = {0x00, 0x00, 0x00, 0x00};
+  append_mac(pdu, mac);
+  const size_t rlc_hdr_len = 2;
+  const size_t rrc_len = pdu->N_bytes;
+  const size_t rlc_sdu_len = rlc_hdr_len + rrc_len;
+
+  uint8_t sdu[rlc_sdu_len];
+  uint8_t* p = sdu;
+  srsran::rlc_amd_pdu_header_t header = {};
+  header.dc  = srsran::RLC_DC_FIELD_DATA_PDU;
+  header.rf  = 0;
+  header.p   = 1;
+  header.fi  = srsran::RLC_FI_FIELD_START_AND_END_ALIGNED;
+  header.sn  = 0;
+  header.N_li = 0;
+  srsran::rlc_am_write_data_pdu_header(&header, &p);
+  memcpy(p, pdu->msg, rrc_len);
+  p += rrc_len;
+  
+  printf("RLC Message (%zu bytes): ", rlc_sdu_len);
+  for (size_t i = 0; i < rlc_sdu_len; ++i) {
+      printf("%02x ", sdu[i]);
+  }
+  printf("\n");
+  auto& mac_logger = srslog::fetch_basic_logger("MAC");
+  uint32_t mac_subheader_len = 1;
+  if (rlc_sdu_len >= 128) {
+      mac_subheader_len = 2;
+  }
+  uint32_t required_mac_pdu_size = mac_subheader_len + rlc_sdu_len;
+
+  srsran::byte_buffer_t pdu_buf;
+  srsran::sch_pdu mac_msg_dl(required_mac_pdu_size, mac_logger);
+  mac_msg_dl.init_tx(&pdu_buf, required_mac_pdu_size, true);
+  mac_msg_dl.new_subh();
+  mac_msg_dl.get()->set_sdu(1, rlc_sdu_len, sdu);
+  uint8_t* ptr = mac_msg_dl.write_packet(mac_logger);
+  uint32_t len = mac_msg_dl.get_pdu_len();
+  if (pdu->capacity() < len) {
+    printf("Buffer too small to store the generated PDU\n");
+    return;
+  }
+  memcpy(pdu->msg, ptr, len);
+  pdu->N_bytes = len;
+  std::cout<< pdu->data() << std::endl;
+  memcpy(buffer, ptr, len);
+  *msg_len = len;
+  printf("==== MAC Attach Reject PDU (%d bytes) ====\n", len);
+  hexdump(ptr, len);
+}
+
+void gen_attach_accept_nas_pdu(srsran::unique_byte_buffer_t& msg)
+{
+  const char* nas_hex = "0742013e060000f1100007001d5201c10107070673727361706e0501ac100002270880000d0408080808500bf600f11000011a791571281300f1";
+  hex_string_to_byte_array(nas_hex, msg->msg);
+  msg->N_bytes = strlen(nas_hex) / 2;
+}
+void gen_attach_accept_pdu(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
+{
+  srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
+  gen_attach_accept_nas_pdu(nas_tx);
+  printf("NAS Message (%d bytes): ", nas_tx->N_bytes);
+  for (uint32_t i = 0; i < nas_tx->N_bytes; ++i) {
+    printf("%02x ", nas_tx->msg[i]);
+  }
+  printf("\n");
+  dl_dcch_msg_s dl_dcch_msg;
+  dl_dcch_msg.msg.set_c1();
+  dl_dcch_msg_type_c::c1_c_* msg_c1 = &dl_dcch_msg.msg.c1();
+
+
+  dl_info_transfer_r8_ies_s* dl_info_r8 =
+      &msg_c1->set_dl_info_transfer().crit_exts.set_c1().set_dl_info_transfer_r8();
+  //    msg_c1->dl_info_transfer().rrc_transaction_id = ;
+  dl_info_r8->non_crit_ext_present = false;
+  dl_info_r8->ded_info_type.set_ded_info_nas();
+  dl_info_r8->ded_info_type.ded_info_nas().resize(nas_tx->N_bytes);
+  memcpy(msg_c1->dl_info_transfer().crit_exts.c1().dl_info_transfer_r8().ded_info_type.ded_info_nas().data(),
+  nas_tx->msg,
+  nas_tx->N_bytes);
+  srsran::unique_byte_buffer_t pdu;
+
+  if (pdu == nullptr) {
+    pdu = srsran::make_byte_buffer();
+    if (pdu == nullptr) {
+    }
+  }
+  asn1::bit_ref bref(pdu->msg, pdu->get_tailroom());
+  if (dl_dcch_msg.pack(bref) == asn1::SRSASN_ERROR_ENCODE_FAIL) {
+    printf("Failed to encode DL-DCCH-Msg");
+  }
+  pdu->N_bytes = (uint32_t)bref.distance_bytes();
+  printf("RRC Message (%d bytes): ", pdu->N_bytes);
+    for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
+
+  write_data_header(pdu, 0);
+  printf("PDCP Message (%d bytes): ", pdu->N_bytes);
+  for (uint32_t i = 0; i < pdu->N_bytes; ++i) {
+    printf("%02x ", pdu->msg[i]);
+  }
+  printf("\n");
+  const size_t mac_len = 4;
+  uint8_t mac[mac_len] = {0x00, 0x00, 0x00, 0x00};
+  append_mac(pdu, mac);
+  const size_t rlc_hdr_len = 2;
+  const size_t rrc_len = pdu->N_bytes;
+  const size_t rlc_sdu_len = rlc_hdr_len + rrc_len; 
+  uint8_t sdu[rlc_sdu_len];
+  uint8_t* p = sdu;
+  srsran::rlc_amd_pdu_header_t header = {};
+  header.dc  = srsran::RLC_DC_FIELD_DATA_PDU;
+  header.rf  = 0;
+  header.p   = 1;
+  header.fi  = srsran::RLC_FI_FIELD_START_AND_END_ALIGNED;
+  header.sn  = 0;
+  header.N_li = 0;
+  srsran::rlc_am_write_data_pdu_header(&header, &p);
+  memcpy(p, pdu->msg, rrc_len);
+  p += rrc_len;
+  printf("RLC Message (%zu bytes): ", rlc_sdu_len);
+  for (size_t i = 0; i < rlc_sdu_len; ++i) {
+      printf("%02x ", sdu[i]);
+  }
+  printf("\n");
+  auto& mac_logger = srslog::fetch_basic_logger("MAC");
+  uint32_t mac_subheader_len = 1;
+  if (rlc_sdu_len >= 128) {
+      mac_subheader_len = 2;
+  }
+  uint32_t required_mac_pdu_size = mac_subheader_len + rlc_sdu_len;
+  srsran::byte_buffer_t pdu_buf;
+  srsran::sch_pdu mac_msg_dl(required_mac_pdu_size, mac_logger);
+  mac_msg_dl.init_tx(&pdu_buf, required_mac_pdu_size, true);
+  mac_msg_dl.new_subh();
+  mac_msg_dl.get()->set_sdu(1, rlc_sdu_len, sdu);
+  uint8_t* ptr = mac_msg_dl.write_packet(mac_logger);
+  uint32_t len = mac_msg_dl.get_pdu_len();
+  if (pdu->capacity() < len) {
+    printf("Buffer too small to store the generated PDU\n");
+    return;
+  }
+  memcpy(pdu->msg, ptr, len);
+  pdu->N_bytes = len;
+  std::cout<< pdu->data() << std::endl;
+  memcpy(buffer, ptr, len);
+  *msg_len = len;
+  printf("==== MAC Attach Accept PDU (%d bytes) ====\n", len);
+  hexdump(ptr, len);
+}
+

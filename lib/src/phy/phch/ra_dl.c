@@ -327,7 +327,7 @@ int srsran_dl_fill_ra_mcs(srsran_ra_tb_t* tb, int last_tbs, uint32_t nprb, bool 
 
   // Get Transport block size index
   int i_tbs = srsran_ra_tbs_idx_from_mcs(tb->mcs_idx, pdsch_use_tbs_index_alt, false);
-
+  printf("DL DCI: MCS=%d -> Mod=%s, TBS_idx=%d\n", tb->mcs_idx, srsran_mod_string(tb->mod), i_tbs);
   // If i_tbs = -1, TBS is determined from the latest PDCCH for this TB (7.1.7.2 36.213)
   int tbs = 0;
   if (i_tbs >= 0) {
@@ -373,9 +373,12 @@ static int dl_dci_compute_tb(bool pdsch_use_tbs_index_alt, const srsran_dci_dl_t
 
   if (!SRSRAN_RNTI_ISUSER(dci->rnti) && !SRSRAN_RNTI_ISMBSFN(dci->rnti)) {
     if (dci->format == SRSRAN_DCI_FORMAT1A) {
+
       n_prb = dci->type2_alloc.n_prb1a == SRSRAN_RA_TYPE2_NPRB1A_2 ? 2 : 3;
       i_tbs = dci->tb[0].mcs_idx;
       tbs   = srsran_ra_tbs_from_idx(i_tbs, n_prb);
+
+
       if (tbs < 0) {
         ERROR("Invalid TBS_index=%d or n_prb=%d", i_tbs, n_prb);
         return SRSRAN_ERROR;
@@ -407,6 +410,8 @@ static int dl_dci_compute_tb(bool pdsch_use_tbs_index_alt, const srsran_dci_dl_t
     for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
       if (grant->tb[i].enabled) {
         grant->tb[i].tbs = srsran_dl_fill_ra_mcs(&grant->tb[i], grant->last_tbs[i], n_prb, pdsch_use_tbs_index_alt);
+        //test yg print
+        printf("DL DCI: Setting TBS=%d prb=%d\n", grant->tb[i].tbs, n_prb);
         if (grant->tb[i].tbs < 0) {
           char str[128];
           srsran_dci_dl_info(dci, str, sizeof(str));
@@ -418,6 +423,7 @@ static int dl_dci_compute_tb(bool pdsch_use_tbs_index_alt, const srsran_dci_dl_t
       }
     }
   }
+
   return SRSRAN_SUCCESS;
 }
 

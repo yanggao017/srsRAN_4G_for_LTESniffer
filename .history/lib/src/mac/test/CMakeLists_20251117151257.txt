@@ -32,3 +32,6 @@ add_test(mac_pdu_nr_test mac_pdu_nr_test)
 
 add_executable(pdu_test_lunatic pdu_test_lunatic.cc)
 target_link_libraries(pdu_test_lunatic srsran_rlc srsran_phy srsran_asn1 srsran_common srsran_mac ${CMAKE_THREAD_LIBS_INIT})
+
+add_executable(mac2pcap mac2pcap.cc)
+target_link_libraries(mac2pcap srsran_mac srsran_common ${CMAKE_THREAD_LIBS_INIT})

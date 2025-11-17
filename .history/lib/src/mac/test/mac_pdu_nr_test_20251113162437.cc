@@ -45,14 +45,10 @@ uint8_t registration_reject[] = {
     0x41, 0x00, 0x0f, 0xc0, 0x00, 0x00, 0x00, 0x2c, 0x80, 0x8f, 0xc0, 0x08,
     0x83, 0x60, 0x00, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00};
 //authen reject
-//const char* mac_hex = "010e8001000128806fc00b0000000000";
+const char* mac_hex = "010e8001000128806fc00b0000000000";
 //rege request
-//const char* mac_hex = "0123c0000000100005df80105e400340403c4400000000040c951d820b80bc1c00000000003d05";
-//const char* mac_hex = "212e1fa000000a01203a9009410d3897d2d9ee05b5ec766f5cc2ee4082b3ca26b869fc0004bde3166e848b5780000000001222bd59061e4ff06918678390d53e40c6e0611d483";
-//const char* mac_hex = "210c1fa001010a00103aa00000000061933d2623d284ab30088c9502ffe591a4";
-//dl detach request
-//const char* mac_hex = "01a000000800103a2800000000";
-const char* mac_hex = "01A000000800183A281800000000";
+const char* mac_hex = "0123c0000000100005df80105e400340403c4400000000040c951d820b80bc1c00000000003d05";
+
 void hex_string_to_byte_array(const char *hex_string, uint8_t *byte_array) {
   size_t len = strlen(hex_string);
   for (size_t i = 0; i < len; i += 2) {
@@ -92,10 +88,7 @@ int mac_dl_sch_pdu_unpack_and_pack_test1()
   if (pcap_handle) {
     pcap_handle->write_dl_crnti_nr(mac_dl_sch_pdu_1, sizeof(mac_dl_sch_pdu_1), PCAP_CRNTI, true, PCAP_TTI);
     pcap_handle->write_dl_crnti_nr(registration_reject, sizeof(registration_reject), PCAP_CRNTI, true, PCAP_TTI);
-    //pcap_handle->write_dl_crnti_nr(authen_reject, sizeof(authen_reject), PCAP_CRNTI, true, PCAP_TTI);
-    //pcap_handle->write_ul_crnti_nr(authen_reject, sizeof(authen_reject), PCAP_CRNTI, true, PCAP_TTI);
-    pcap_handle->write_dl_crnti(authen_reject, sizeof(authen_reject), PCAP_CRNTI, 1, true, PCAP_TTI, 1);
-
+    pcap_handle->write_dl_crnti_nr(authen_reject, sizeof(authen_reject), PCAP_CRNTI, true, PCAP_TTI);
     pcap_handle->write_ul_crnti_nr(pusch_ack, sizeof(pusch_ack), PCAP_CRNTI, true, PCAP_TTI);
 
 
