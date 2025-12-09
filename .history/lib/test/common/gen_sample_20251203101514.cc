@@ -248,9 +248,6 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
-  /*if (write_pcap) {
-    write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
-  }*/
 
   sf_cfg_dl.tti = tti;
   sf_cfg_dl.cfi = cfi;

@@ -95,14 +95,11 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  static cf_t* po_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ar_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ir_buffer[SRSRAN_MAX_PORTS] = {NULL};
- static cf_t* ext_buffer[SRSRAN_MAX_PORTS] = {NULL};
 
  static char* paging_file_name;
  //static char* mib_file_name;
  static char* sib1_file_name;
  static char* sib2_file_name;
- static char* ext_file_name;
-
 
  static char* attachreject_file_name;
  static char* identityrequest_file_name;
@@ -113,7 +110,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  char* attack_mode;
  const char* cache_root = "./cache";  // 你的缓存根目录
  char cell_config_path[256];
- int target_tti;
 
  static uint32_t max_num_samples;
  static srsran_ue_mib_t ue_mib;
@@ -275,8 +271,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                 rf_dev = argv[optind-1];
                 break;
             case 'i':
-                ext_file_name = optarg;
-                printf("file name: %s\n", ext_file_name);
+                ext_msg_file = optarg;
                 break;
             case 'a':
                 rf_args = optarg;
@@ -383,10 +378,9 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                 else if (strcmp(attack_mode, "identity_request") == 0) {
                     ir_msg = true;
                     identityrequest_file_name = "identity_request_sf8.fc32";
-
-                } else if (strcmp(attack_mode, "extend") == 0) {
-                  ext_msg = true;
-                } else {
+                }
+                else {
+                    ext_msg = true;
                     fprintf(stderr, "[ERROR] Unknown --type: %s\n", attack_mode);
                     usage(argv[0]);
                     exit(-1);
@@ -474,14 +468,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
    }
  
    for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
-      ext_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
-      //printf("test yg 1230 sf_n_samples:%d\n", sf_n_samples);
-      if (!ext_buffer[i]) {
-        perror("malloc");
-        exit(-1);
-      }
-      srsran_vec_cf_zero(ext_buffer[i], sf_n_samples);
-
      paging_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
      //printf("test yg 1230 sf_n_samples:%d\n", sf_n_samples);
      if (!paging_buffer[i]) {
@@ -693,9 +679,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
      if (sf_buffer_sync[i]) {
        free(sf_buffer_sync[i]);
      }
-     if (ext_buffer[i]) {
-      free(ext_buffer[i]);
-    }
      if (paging_buffer[i]) {
        free(paging_buffer[i]);
      }
@@ -1128,6 +1111,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
    int target_sfn;
    int next_sfn = -1;
    int cur_rx_ret;
+   int target_tti;
    srsran_timestamp_t cur_time;
    float estimated_cfo, estimated_sfo;
    bool fisrt_over = true;
@@ -1224,17 +1208,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
         srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
         printf("%s [Subframe 9] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
         ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-        if (ret != sf_n_samples) {
-          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
-          exit(-1);
-        }
-        target_sfn = (target_sfn + 1) % 1024;
-      } else if(ext_msg) {
-        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
-        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
-        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-        printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
-        ret = srsran_rf_send_timed_multi(&radio, (void**) ext_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
         if (ret != sf_n_samples) {
           printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
           exit(-1);
@@ -1715,21 +1688,8 @@ int main(int argc, char** argv)
       read_file(ar_buffer[0], attachreject_file_name);
     }
     if (ir_msg) {
-      printf ("Ready Identity Request Case!\n");
+      printf ("Ready Attach Reject Case!\n");
       read_file(ir_buffer[0], identityrequest_file_name);
-    }
-    if (ext_msg) {
-      printf ("Ready Extend Msg Case!\n");
-
-      // 从 ext_file_name 提取 TTI
-      const char* sf_ptr = strstr(ext_file_name, "sf");
-      if (sf_ptr) {
-          sscanf(sf_ptr + 2, "%u", &target_tti);
-      } else {
-          target_tti = 4; // 默认值
-      }
-
-      read_file(ext_buffer[0], ext_file_name);
     }
     free(cell_dir);
      /* init memory */

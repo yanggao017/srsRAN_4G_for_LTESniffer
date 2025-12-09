@@ -48,8 +48,7 @@ set(SOURCES arch_select.cc
             time_prof.cc
             version.c
             zuc.cc
-            s3g.cc
-            yg_utils.cc)
+            s3g.cc            yg_utils.cc)
 
 
 # Avoid warnings caused by libmbedtls about deprecated functions

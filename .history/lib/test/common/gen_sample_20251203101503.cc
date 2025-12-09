@@ -38,7 +38,7 @@ static cf_t* signal_buffer[SRSRAN_MAX_PORTS] = {NULL};
 static srsran_dl_sf_cfg_t sf_cfg_dl = {{0}};
 uint32_t preamble =  6;
 bool is_pdcch_order = false;
-bool write_pcap = false;
+
 void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* prog);
 int get_attack_type_from_name(const char* name);
 void parse_args(int argc, char **argv);
@@ -248,9 +248,6 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
-  /*if (write_pcap) {
-    write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
-  }*/
 
   sf_cfg_dl.tti = tti;
   sf_cfg_dl.cfi = cfi;

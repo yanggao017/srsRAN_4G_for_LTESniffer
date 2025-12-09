@@ -276,7 +276,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                 break;
             case 'i':
                 ext_file_name = optarg;
-                printf("file name: %s\n", ext_file_name);
                 break;
             case 'a':
                 rf_args = optarg;
@@ -1233,7 +1232,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
         memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
         time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
         srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
-        printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n",target_tti, attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
         ret = srsran_rf_send_timed_multi(&radio, (void**) ext_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
         if (ret != sf_n_samples) {
           printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
@@ -1720,15 +1719,7 @@ int main(int argc, char** argv)
     }
     if (ext_msg) {
       printf ("Ready Extend Msg Case!\n");
-
-      // 从 ext_file_name 提取 TTI
-      const char* sf_ptr = strstr(ext_file_name, "sf");
-      if (sf_ptr) {
-          sscanf(sf_ptr + 2, "%u", &target_tti);
-      } else {
-          target_tti = 4; // 默认值
-      }
-
+      target_tti = 
       read_file(ext_buffer[0], ext_file_name);
     }
     free(cell_dir);

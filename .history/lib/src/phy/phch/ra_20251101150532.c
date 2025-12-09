@@ -224,7 +224,7 @@ int srsran_ra_mcs_from_tbs_idx(uint32_t tbs_idx, bool use_tbs_index_alt, bool is
 /* Table 7.1.7.2.1-1: Transport block size table on 36.213 */
 int srsran_ra_tbs_from_idx(uint32_t tbs_idx, uint32_t n_prb)
 {
-  //printf("srsran_ra_tbs_from_idx: tbs_idx=%d, n_prb=%d\n", tbs_idx, n_prb); // yg test
+  printf("srsran_ra_tbs_from_idx: tbs_idx=%d, n_prb=%d\n", tbs_idx, n_prb); // yg test
   if (tbs_idx < SRSRAN_RA_NOF_TBS_IDX && n_prb > 0 && n_prb <= SRSRAN_MAX_PRB) {
     return tbs_table[tbs_idx][n_prb - 1];
   } else {

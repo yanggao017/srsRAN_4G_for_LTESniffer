@@ -119,7 +119,6 @@ PDCP头部 0001
 RRC内容 
 MAC内容 00 00 00 00
 */
-
 int main()
 {
   srslog::init();

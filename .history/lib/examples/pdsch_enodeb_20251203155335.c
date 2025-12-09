@@ -276,7 +276,6 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                 break;
             case 'i':
                 ext_file_name = optarg;
-                printf("file name: %s\n", ext_file_name);
                 break;
             case 'a':
                 rf_args = optarg;

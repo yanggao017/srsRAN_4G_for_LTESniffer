@@ -94,4 +94,4 @@ target_link_libraries(mac_pcap_net_test srsran_common ${SCTP_LIBRARIES} ${CMAKE_
 
 find_package(Boost REQUIRED COMPONENTS system filesystem)
 add_executable(gen_sample gen_sample.cc log.cc MsgGeneratorForNoSni.cc)
-target_link_libraries(gen_sample ${Boost_LIBRARIES} srsran_pdcp srsran_rlc srsran_mac srsran_phy srsran_common rrc_asn1 srsran_asn1 s1ap_asn1 asn1_utils ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(gen_sample ${Boost_LIBRARIES} srsran_pdcp srsran_rlc srsran_mac srsran_phy srsran_common rrc_asn1 srsran_asn1 ${CMAKE_THREAD_LIBS_INIT})

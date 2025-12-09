@@ -38,7 +38,7 @@ static cf_t* signal_buffer[SRSRAN_MAX_PORTS] = {NULL};
 static srsran_dl_sf_cfg_t sf_cfg_dl = {{0}};
 uint32_t preamble =  6;
 bool is_pdcch_order = false;
-bool write_pcap = false;
+
 void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* prog);
 int get_attack_type_from_name(const char* name);
 void parse_args(int argc, char **argv);
@@ -108,7 +108,7 @@ void usage(const char *prog) {
   printf("  Attach Reject:          %s --type attach_reject -r 0x46 -s 5 -o out_rej -p 100 -c 420\n", prog);
 }
 
-static const char* optstring = "c:f:p:s:r:o:m:i:hv:w";
+static const char* optstring = "c:f:p:s:r:o:m:i:hv";
 static struct option long_options[] = {
     {"type", required_argument, 0, 'T'},
     {0, 0, 0, 0}
@@ -120,9 +120,6 @@ void parse_args(int argc, char **argv) {
   optind = 1;
   while ((opt = getopt_long(argc, argv, optstring, long_options, &option_index)) != -1) {
     switch (opt) {
-      case 'w':
-        write_pcap = true;
-        break;
       case 'c':
         cell.id = (uint32_t)strtol(optarg, NULL, 10);
         break;
@@ -248,9 +245,6 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
-  /*if (write_pcap) {
-    write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
-  }*/
 
   sf_cfg_dl.tti = tti;
   sf_cfg_dl.cfi = cfi;
@@ -467,7 +461,7 @@ int generate_format1a_broadcast(uint32_t tbs_bytes, uint32_t cell_nof_prb, uint3
       break;
       }
   }
-  //printf("Selected MCS index: %d prb:%d\n", mcs, l_crb);
+  printf("Selected MCS index: %d prb:%d\n", mcs, l_crb);
   if (i == 28) {
       ERROR("Can't allocate Format 1A for TBS=%d\n", tbs);
       return -1;
