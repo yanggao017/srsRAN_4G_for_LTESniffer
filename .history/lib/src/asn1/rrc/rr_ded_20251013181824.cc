@@ -6172,10 +6172,7 @@ SRSASN_CODE srb_to_add_mod_s::pack(bit_ref& bref) const
   HANDLE_CODE(bref.pack(rlc_cfg_present, 1));
   HANDLE_CODE(bref.pack(lc_ch_cfg_present, 1));
 
-  //test yg changed
-//HANDLE_CODE(pack_integer(bref, srb_id, (uint8_t)1u, (uint8_t)2u));
-
-HANDLE_CODE(pack_integer(bref, srb_id, (uint8_t)1u, (uint8_t)3u));
+  HANDLE_CODE(pack_integer(bref, srb_id, (uint8_t)1u, (uint8_t)2u));
   if (rlc_cfg_present) {
     HANDLE_CODE(rlc_cfg.pack(bref));
   }
