@@ -1,16 +1,16 @@
 #
-# Copyright 2013-2017 Software Radio Systems Limited
+# Copyright 2013-2023 Software Radio Systems Limited
 #
-# This file is part of srsLTE
+# This file is part of srsRAN
 #
-# srsLTE is free software: you can redistribute it and/or modify
+# srsRAN is free software: you can redistribute it and/or modify
 # it under the terms of the GNU Affero General Public License as
 # published by the Free Software Foundation, either version 3 of
 # the License, or (at your option) any later version.
 #
-# srsLTE is distributed in the hope that it will be useful,
+# srsRAN is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 # GNU Affero General Public License for more details.
 #
 # A copy of the GNU Affero General Public License can be found in
@@ -35,27 +35,28 @@ add_subdirectory(resampling)
 add_subdirectory(scrambling)
 add_subdirectory(ue)
 add_subdirectory(enb)
+add_subdirectory(gnb)
+add_subdirectory(cfr)
+set(srsran_srcs     $<TARGET_OBJECTS:srsran_agc>
+        $<TARGET_OBJECTS:srsran_ch_estimation>
+        $<TARGET_OBJECTS:srsran_phy_common>
+        $<TARGET_OBJECTS:srsran_fec>
+        $<TARGET_OBJECTS:srsran_mimo>
+        $<TARGET_OBJECTS:srsran_phch>
+        $<TARGET_OBJECTS:srsran_sync>
+        $<TARGET_OBJECTS:srsran_utils>
+        $<TARGET_OBJECTS:srsran_channel>
+        $<TARGET_OBJECTS:srsran_dft>
+        $<TARGET_OBJECTS:srsran_io>
+        $<TARGET_OBJECTS:srsran_modem>
+        $<TARGET_OBJECTS:srsran_resampling>
+        $<TARGET_OBJECTS:srsran_scrambling>
+        $<TARGET_OBJECTS:srsran_ue>
+        $<TARGET_OBJECTS:srsran_enb>
+        $<TARGET_OBJECTS:srsran_gnb>
+        $<TARGET_OBJECTS:srsran_cfr>
+        )
 
-set(srslte_srcs     $<TARGET_OBJECTS:srslte_agc>
-                    $<TARGET_OBJECTS:srslte_ch_estimation>
-                    $<TARGET_OBJECTS:srslte_phy_common>
-                    $<TARGET_OBJECTS:srslte_fec>
-                    $<TARGET_OBJECTS:srslte_mimo>
-                    $<TARGET_OBJECTS:srslte_phch>
-                    $<TARGET_OBJECTS:srslte_sync>
-                    $<TARGET_OBJECTS:srslte_utils>
-                    $<TARGET_OBJECTS:srslte_channel>
-                    $<TARGET_OBJECTS:srslte_dft>
-                    $<TARGET_OBJECTS:srslte_io>
-                    $<TARGET_OBJECTS:srslte_modem>
-                    $<TARGET_OBJECTS:srslte_resampling>
-                    $<TARGET_OBJECTS:srslte_scrambling>
-                    $<TARGET_OBJECTS:srslte_ue>
-                    $<TARGET_OBJECTS:srslte_enb>
-)
-
-add_library(srslte_phy STATIC ${srslte_srcs})
-target_link_libraries(srslte_phy ${FFT_LIBRARIES})
-
-target_link_libraries(srslte_phy pthread m)
-install(TARGETS srslte_phy DESTINATION ${LIBRARY_DIR})
+add_library(srsran_phy STATIC ${srsran_srcs} )
+target_link_libraries(srsran_phy pthread m ${FFT_LIBRARIES})
+install(TARGETS srsran_phy DESTINATION ${LIBRARY_DIR} OPTIONAL)

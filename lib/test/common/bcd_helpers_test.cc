@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsUE library.
- *
- * srsUE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsUE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,44 +19,45 @@
  *
  */
 
-#include <assert.h>
-#include "srslte/common/bcd_helpers.h"
+#include "srsran/common/bcd_helpers.h"
+#include "srsran/common/test_common.h"
 
-using namespace srslte;
+using namespace srsran;
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
   std::string mcc_str = "001";
   std::string mnc_str = "001";
-  uint16_t mcc;
-  uint16_t mnc;
+  uint16_t    mcc;
+  uint16_t    mnc;
 
   // String to code
 
-  assert(string_to_mcc(mcc_str, &mcc));
-  assert(mcc == 0xF001);
+  TESTASSERT(string_to_mcc(mcc_str, &mcc));
+  TESTASSERT(mcc == 0xF001);
 
-  assert(string_to_mnc(mnc_str, &mnc));
-  assert(mnc == 0xF001);
+  TESTASSERT(string_to_mnc(mnc_str, &mnc));
+  TESTASSERT(mnc == 0xF001);
 
   mnc_str = "01";
-  assert(string_to_mnc(mnc_str, &mnc));
-  assert(mnc == 0xFF01);
+  TESTASSERT(string_to_mnc(mnc_str, &mnc));
+  TESTASSERT(mnc == 0xFF01);
 
   // Code to string
 
   mcc_str = "";
   mnc_str = "";
-  mcc = 0xF001;
-  mnc = 0xF001;
+  mcc     = 0xF001;
+  mnc     = 0xF001;
 
-  assert(mcc_to_string(mcc, &mcc_str));
-  assert(mcc_str.compare("001") == 0);
+  TESTASSERT(mcc_to_string(mcc, &mcc_str));
+  TESTASSERT(mcc_str.compare("001") == 0);
 
-  assert(mnc_to_string(mnc, &mnc_str));
-  assert(mnc_str.compare("001") == 0);
+  TESTASSERT(mnc_to_string(mnc, &mnc_str));
+  TESTASSERT(mnc_str.compare("001") == 0);
 
   mnc = 0xFF01;
-  assert(mnc_to_string(mnc, &mnc_str));
-  assert(mnc_str.compare("01") == 0);
+  TESTASSERT(mnc_to_string(mnc, &mnc_str));
+  TESTASSERT(mnc_str.compare("01") == 0);
+  return SRSRAN_SUCCESS;
 }

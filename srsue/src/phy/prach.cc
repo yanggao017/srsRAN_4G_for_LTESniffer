@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsUE library.
- *
- * srsUE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsUE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,205 +19,233 @@
  *
  */
 
-#include <string.h>
-#include <strings.h>
-#include <pthread.h>
+#include "srsue/hdr/phy/prach.h"
+#include "srsran/common/standard_streams.h"
+#include "srsran/interfaces/phy_interface_types.h"
+#include "srsran/srsran.h"
 
-#include "srslte/srslte.h"
-#include "srslte/common/log.h"
-#include "phy/prach.h"
-#include "phy/phy.h"
-#include "srslte/interfaces/ue_interfaces.h"
+#define Error(fmt, ...)                                                                                                \
+  if (SRSRAN_DEBUG_ENABLED)                                                                                            \
+  logger.error(fmt, ##__VA_ARGS__)
+#define Warning(fmt, ...)                                                                                              \
+  if (SRSRAN_DEBUG_ENABLED)                                                                                            \
+  logger.warning(fmt, ##__VA_ARGS__)
+#define Info(fmt, ...)                                                                                                 \
+  if (SRSRAN_DEBUG_ENABLED)                                                                                            \
+  logger.info(fmt, ##__VA_ARGS__)
+#define Debug(fmt, ...)                                                                                                \
+  if (SRSRAN_DEBUG_ENABLED)                                                                                            \
+  logger.debug(fmt, ##__VA_ARGS__)
 
-#define Error(fmt, ...)   if (SRSLTE_DEBUG_ENABLED) log_h->error(fmt, ##__VA_ARGS__)
-#define Warning(fmt, ...) if (SRSLTE_DEBUG_ENABLED) log_h->warning(fmt, ##__VA_ARGS__)
-#define Info(fmt, ...)    if (SRSLTE_DEBUG_ENABLED) log_h->info(fmt, ##__VA_ARGS__)
-#define Debug(fmt, ...)   if (SRSLTE_DEBUG_ENABLED) log_h->debug(fmt, ##__VA_ARGS__)
+using namespace srsue;
 
-namespace srsue {
- 
-
-prach::~prach() {
-  if (mem_initiated) {
-    for (int i=0;i<64;i++) {
-      if (buffer[i]) {
-        free(buffer[i]);
-      }
-    }
-    if (signal_buffer) {
-      free(signal_buffer);
-    }
-    srslte_cfo_free(&cfo_h);
-    srslte_prach_free(&prach_obj);
-  }
-}
-
-void prach::init(LIBLTE_RRC_PRACH_CONFIG_SIB_STRUCT *config_, uint32_t max_prb, phy_args_t *args_, srslte::log* log_h_)
+void prach::init(uint32_t max_prb)
 {
-  log_h  = log_h_;
-  config = config_;
-  args   = args_;
+  std::lock_guard<std::mutex> lock(mutex);
 
-  for (int i=0;i<64;i++) {
-    buffer[i] = (cf_t*) srslte_vec_malloc(SRSLTE_PRACH_MAX_LEN*sizeof(cf_t));
-    if(!buffer[i]) {
-      perror("malloc");
-      return;
-    }
-  }
-  if (srslte_cfo_init(&cfo_h, SRSLTE_PRACH_MAX_LEN)) {
-    fprintf(stderr, "PRACH: Error initiating CFO\n");
+  if (srsran_cfo_init(&cfo_h, SRSRAN_PRACH_MAX_LEN)) {
+    ERROR("PRACH: Error initiating CFO");
     return;
   }
-  srslte_cfo_set_tol(&cfo_h, 0);
-  signal_buffer = (cf_t *) srslte_vec_malloc(SRSLTE_PRACH_MAX_LEN * sizeof(cf_t));
+
+  srsran_cfo_set_tol(&cfo_h, 0);
+
+  signal_buffer = srsran_vec_cf_malloc(SRSRAN_MAX(MAX_LEN_SF * 30720U, SRSRAN_PRACH_MAX_LEN));
   if (!signal_buffer) {
     perror("malloc");
     return;
   }
-  if (srslte_prach_init(&prach_obj, srslte_symbol_sz(max_prb))) {
-    Error("Initiating PRACH library\n");
+
+  if (srsran_prach_init(&prach_obj, srsran_symbol_sz(max_prb))) {
+    Error("Initiating PRACH library");
     return;
   }
+
   mem_initiated = true;
 }
 
-bool prach::set_cell(srslte_cell_t cell_)
+void prach::stop()
 {
-  if (mem_initiated) {
-    // TODO: Check if other PRACH parameters changed
-    if (cell_.id != cell.id || !cell_initiated) {
-      memcpy(&cell, &cell_, sizeof(srslte_cell_t));
-      preamble_idx = -1;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!mem_initiated) {
+    return;
+  }
 
-      uint32_t configIdx      = config->prach_cnfg_info.prach_config_index;
-      uint32_t rootSeq        = config->root_sequence_index;
-      uint32_t zeroCorrConfig = config->prach_cnfg_info.zero_correlation_zone_config;
-      uint32_t freq_offset    = config->prach_cnfg_info.prach_freq_offset;
-      bool     highSpeed      = config->prach_cnfg_info.high_speed_flag;
+  free(signal_buffer);
+  srsran_cfo_free(&cfo_h);
+  srsran_prach_free(&prach_obj);
+  mem_initiated = false;
+}
 
-      if (6 + freq_offset > cell.nof_prb) {
-        log_h->console("Error no space for PRACH: frequency offset=%d, N_rb_ul=%d\n", freq_offset, cell.nof_prb);
-        log_h->error("Error no space for PRACH: frequency offset=%d, N_rb_ul=%d\n", freq_offset, cell.nof_prb);
-        return false;
-      }
+bool prach::set_cell(srsran_cell_t cell_, srsran_prach_cfg_t prach_cfg)
+{
+  std::lock_guard<std::mutex> lock(mutex);
 
-      Info("PRACH: configIdx=%d, rootSequence=%d, zeroCorrelationConfig=%d, freqOffset=%d\n",
-            configIdx, rootSeq, zeroCorrConfig, freq_offset);
-
-      if (srslte_prach_set_cell(&prach_obj, srslte_symbol_sz(cell.nof_prb),
-                                 configIdx, rootSeq, highSpeed, zeroCorrConfig)) {
-        Error("Initiating PRACH library\n");
-        return false;
-      }
-      for (int i=0;i<64;i++) {
-        if(srslte_prach_gen(&prach_obj, i, freq_offset, buffer[i])) {
-          Error("Generating PRACH preamble %d\n", i);
-          return false;
-        }
-      }
-
-      len = prach_obj.N_seq + prach_obj.N_cp;
-      transmitted_tti = -1;
-      cell_initiated = true;
-    }
-    return true;
-  } else {
-    fprintf(stderr, "PRACH: Error must call init() first\n");
+  if (!mem_initiated) {
+    ERROR("PRACH: Error must call init() first");
     return false;
   }
+
+  if (cell.id == cell_.id && cell_initiated && prach_cfg == cfg) {
+    return true;
+  }
+
+  cell = cell_;
+  cfg  = prach_cfg;
+  // We must not reset preamble_idx here, MAC might have already called prepare_to_send()
+
+  if (6 + prach_cfg.freq_offset > cell.nof_prb) {
+    srsran::console("Error no space for PRACH: frequency offset=%d, N_rb_ul=%d\n", prach_cfg.freq_offset, cell.nof_prb);
+    logger.error("Error no space for PRACH: frequency offset=%d, N_rb_ul=%d", prach_cfg.freq_offset, cell.nof_prb);
+    return false;
+  }
+
+  Info("PRACH: cell.id=%d, configIdx=%d, rootSequence=%d, zeroCorrelationConfig=%d, freqOffset=%d",
+       cell.id,
+       prach_cfg.config_idx,
+       prach_cfg.root_seq_idx,
+       prach_cfg.zero_corr_zone,
+       prach_cfg.freq_offset);
+
+  if (srsran_prach_set_cfg(&prach_obj, &prach_cfg, cell.nof_prb)) {
+    Error("Initiating PRACH library");
+    return false;
+  }
+
+  len             = prach_obj.N_seq + prach_obj.N_cp;
+  transmitted_tti = -1;
+  cell_initiated  = true;
+
+  logger.info("Finished setting new PRACH configuration.");
+
+  return true;
+}
+
+bool prach::generate_buffer(uint32_t f_idx)
+{
+  uint32_t freq_offset = cfg.freq_offset;
+  if (cell.frame_type == SRSRAN_TDD) {
+    freq_offset = srsran_prach_f_ra_tdd(
+        cfg.config_idx, cfg.tdd_config.sf_config, (f_idx / 6) * 10, f_idx % 6, cfg.freq_offset, cell.nof_prb);
+  }
+  if (srsran_prach_gen(&prach_obj, preamble_idx, freq_offset, signal_buffer)) {
+    Error("Generating PRACH preamble %d", preamble_idx);
+    return false;
+  }
+
+  return true;
 }
 
 bool prach::prepare_to_send(uint32_t preamble_idx_, int allowed_subframe_, float target_power_dbm_)
 {
-  if (cell_initiated && preamble_idx_ < 64) {
-    preamble_idx = preamble_idx_;
-    target_power_dbm = target_power_dbm_;
-    allowed_subframe = allowed_subframe_; 
-    transmitted_tti = -1; 
-    Debug("PRACH: prepare to send preamble %d\n", preamble_idx);
-    return true; 
-  } else {
-    if (!cell_initiated) {
-      Error("PRACH: Cell not configured\n");
-    } else if (preamble_idx_ >= 64) {
-      Error("PRACH: Invalid preamble %d\n", preamble_idx_);
-    }
-    return false; 
+  std::lock_guard<std::mutex> lock(mutex);
+  if (preamble_idx_ >= max_preambles) {
+    Error("PRACH: Invalid preamble %d", preamble_idx_);
+    return false;
   }
+
+  preamble_idx     = preamble_idx_;
+  target_power_dbm = target_power_dbm_;
+  allowed_subframe = allowed_subframe_;
+  transmitted_tti  = -1;
+  Debug("PRACH: prepare to send preamble %d", preamble_idx);
+  return true;
 }
 
-bool prach::is_pending() {
-  return cell_initiated && preamble_idx >= 0 && preamble_idx < 64;
-}
-
-bool prach::is_ready_to_send(uint32_t current_tti_) {
-  if (is_pending()) {
-    // consider the number of subframes the transmission must be anticipated 
-    uint32_t current_tti = (current_tti_ + tx_advance_sf)%10240;
-    if (srslte_prach_tti_opportunity(&prach_obj, current_tti, allowed_subframe)) {
-      Debug("PRACH Buffer: Ready to send at tti: %d (now is %d)\n", current_tti, current_tti_);
-      transmitted_tti = current_tti; 
-      return true; 
-    }
-  }
-  return false;     
-}
-
-int prach::tx_tti() {
-  return transmitted_tti; 
-}
-
-float prach::get_p0_preamble()
+bool prach::is_pending() const
 {
-  return target_power_dbm; 
+  std::unique_lock<std::mutex> lock(mutex, std::try_to_lock);
+  if (lock.owns_lock()) {
+    return cell_initiated && preamble_idx >= 0 && unsigned(preamble_idx) < max_preambles;
+  }
+  return false;
 }
 
-
-void prach::send(srslte::radio *radio_handler, float cfo, float pathloss, srslte_timestamp_t tx_time)
+bool prach::is_ready_to_send(uint32_t current_tti_, uint32_t current_pci)
 {
-  
-  // Get current TX gain 
-  float old_gain = radio_handler->get_tx_gain(); 
-  
-  // Correct CFO before transmission FIXME: UL SISO Only
-  srslte_cfo_correct(&cfo_h, buffer[preamble_idx], signal_buffer, cfo / srslte_symbol_sz(cell.nof_prb));
-
-  // If power control is enabled, choose amplitude and power 
-  if (args->ul_pwr_ctrl_en) {
-    // Get PRACH transmission power 
-    float tx_power = SRSLTE_MIN(SRSLTE_PC_MAX, pathloss + target_power_dbm);
-    
-    // Get output power for amplitude 1
-    radio_handler->set_tx_power(tx_power);
-        
-    // Scale signal
-    float digital_power = srslte_vec_avg_power_cf(signal_buffer, len);
-    float scale = sqrtf(pow(10,tx_power/10)/digital_power);
-    
-    srslte_vec_sc_prod_cfc(signal_buffer, scale, signal_buffer, len);
-    log_h->console("PRACH: Pathloss=%.2f dB, Target power %.2f dBm, TX_power %.2f dBm, TX_gain %.1f dB\n",
-          pathloss, target_power_dbm, tx_power, radio_handler->get_tx_gain(), scale);
-    
-  } else {
-    float prach_gain = args->prach_gain; 
-    if (prach_gain > 0) {
-      radio_handler->set_tx_gain(prach_gain);
+  // Make sure the curernt PCI is the one we configured the PRACH for
+  if (is_pending() && current_pci == cell.id) {
+    std::lock_guard<std::mutex> lock(mutex);
+    // consider the number of subframes the transmission must be anticipated
+    uint32_t tti_tx = TTI_TX(current_tti_);
+    if (srsran_prach_tti_opportunity(&prach_obj, tti_tx, allowed_subframe)) {
+      Debug("PRACH Buffer: Ready to send at tti: %d (now is %d)", tti_tx, current_tti_);
+      transmitted_tti = tti_tx;
+      return true;
     }
-    Debug("TX PRACH: Power control for PRACH is disabled, setting gain to %.0f dB\n", prach_gain);
+  }
+  return false;
+}
+
+phy_interface_mac_lte::prach_info_t prach::get_info() const
+{
+  std::lock_guard<std::mutex>         lock(mutex);
+  phy_interface_mac_lte::prach_info_t info = {};
+
+  info.preamble_format = prach_obj.config_idx / 16;
+  if (transmitted_tti >= 0) {
+    info.tti_ra = (uint32_t)transmitted_tti;
+    if (cell.frame_type == SRSRAN_TDD) {
+      info.f_id =
+          srsran_prach_f_id_tdd(prach_obj.config_idx, prach_obj.tdd_config.sf_config, prach_obj.current_prach_idx);
+    }
+    info.is_transmitted = true;
+  } else {
+    info.is_transmitted = false;
+  }
+  return info;
+}
+
+cf_t* prach::generate(float cfo, uint32_t* nof_sf, float* target_power)
+{
+  std::lock_guard<std::mutex> lock(mutex);
+  if (!cell_initiated || preamble_idx < 0 || !nof_sf || unsigned(preamble_idx) >= max_preambles ||
+      !srsran_cell_isvalid(&cell) || len >= MAX_LEN_SF * 30720 || len == 0) {
+    Error("PRACH: Invalid parameters: cell_initiated=%d, preamble_idx=%d, cell.nof_prb=%d, len=%d",
+          cell_initiated,
+          preamble_idx,
+          cell.nof_prb,
+          len);
+    return nullptr;
   }
 
-  void *tmp_buffer[SRSLTE_MAX_PORTS] = {signal_buffer, NULL, NULL, NULL};
-  radio_handler->tx(tmp_buffer, len, tx_time);
-  radio_handler->tx_end();
-  
-  Info("PRACH: Transmitted preamble=%d, CFO=%.2f KHz, tx_time=%f\n", 
-       preamble_idx, cfo*15, tx_time.frac_secs);
+  uint32_t f_idx = 0;
+  if (cell.frame_type == SRSRAN_TDD) {
+    f_idx = prach_obj.current_prach_idx;
+    // For format4, choose odd or even position
+    if (prach_obj.config_idx >= 48) {
+      f_idx += 6;
+    }
+    if (f_idx >= max_fs) {
+      Error("PRACH Buffer: Invalid f_idx=%d", f_idx);
+      f_idx = 0;
+    }
+  }
+
+  if (!generate_buffer(f_idx)) {
+    return nullptr;
+  }
+
+  // Correct CFO before transmission
+  srsran_cfo_correct(&cfo_h, signal_buffer, signal_buffer, cfo / srsran_symbol_sz(cell.nof_prb));
+
+  // pad guard symbols with zeros
+  uint32_t nsf = SRSRAN_CEIL(len, SRSRAN_SF_LEN_PRB(cell.nof_prb));
+  srsran_vec_cf_zero(&signal_buffer[len], (nsf * SRSRAN_SF_LEN_PRB(cell.nof_prb) - len));
+
+  *nof_sf = nsf;
+
+  if (target_power) {
+    *target_power = target_power_dbm;
+  }
+
+  Info("PRACH: Transmitted preamble=%d, tti_tx=%d, CFO=%.2f KHz, nof_sf=%d, target_power=%.1f dBm",
+       preamble_idx,
+       transmitted_tti,
+       cfo * 15,
+       nsf,
+       target_power_dbm);
   preamble_idx = -1;
 
-  radio_handler->set_tx_gain(old_gain);
-  Debug("Restoring TX gain to %.0f dB\n", old_gain);  
+  return signal_buffer;
 }
-  
-} // namespace srsue
-

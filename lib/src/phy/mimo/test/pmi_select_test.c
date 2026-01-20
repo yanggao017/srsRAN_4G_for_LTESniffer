@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,45 +19,45 @@
  *
  */
 
+#include <complex.h>
+#include <math.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <unistd.h>
-#include <math.h>
 #include <time.h>
-#include <stdbool.h>
-#include <complex.h>
+#include <unistd.h>
 
-
-#include "srslte/phy/utils/vector.h"
-#include "srslte/phy/mimo/precoding.h"
 #include "pmi_select_test.h"
-#include "srslte/phy/utils/debug.h"
+#include "srsran/phy/mimo/precoding.h"
+#include "srsran/phy/utils/debug.h"
+#include "srsran/phy/utils/vector.h"
 
-int main(int argc, char **argv) {
-  cf_t *h[SRSLTE_MAX_PORTS][SRSLTE_MAX_PORTS];
-  float noise_estimate;
-  float sinr_1l[SRSLTE_MAX_CODEBOOKS];
-  float sinr_2l[SRSLTE_MAX_CODEBOOKS];
-  float cn;
+int main(int argc, char** argv)
+{
+  cf_t*    h[SRSRAN_MAX_PORTS][SRSRAN_MAX_PORTS];
+  float    noise_estimate;
+  float    sinr_1l[SRSRAN_MAX_CODEBOOKS];
+  float    sinr_2l[SRSRAN_MAX_CODEBOOKS];
+  float    cn;
   uint32_t pmi[2];
-  uint32_t nof_symbols = (uint32_t) SRSLTE_SF_LEN_RE(6, SRSLTE_CP_NORM);
-  int ret = SRSLTE_ERROR;
+  uint32_t nof_symbols = (uint32_t)SRSRAN_SF_LEN_RE(6, SRSRAN_CP_NORM);
+  int      ret         = SRSRAN_ERROR;
 
   /* Allocate channels */
-  for (int i = 0; i < SRSLTE_MAX_PORTS; i++) {
-    for (int j = 0; j < SRSLTE_MAX_PORTS; j++) {
-      h[i][j] = srslte_vec_malloc(sizeof(cf_t) * nof_symbols);
+  for (int i = 0; i < SRSRAN_MAX_PORTS; i++) {
+    for (int j = 0; j < SRSRAN_MAX_PORTS; j++) {
+      h[i][j] = srsran_vec_cf_malloc(nof_symbols);
       if (!h[i][j]) {
         goto clean;
       }
-      bzero(h[i][j], sizeof(cf_t) * nof_symbols);
+      srsran_vec_cf_zero(h[i][j], nof_symbols);
     }
   }
 
   for (int c = 0; c < PMI_SELECT_TEST_NOF_CASES; c++) {
-    pmi_select_test_case_gold_t *gold = &pmi_select_test_case_gold[c];
+    pmi_select_test_case_gold_t* gold = &pmi_select_test_case_gold[c];
 
     /* Set channel */
     for (int i = 0; i < 2; i++) {
@@ -79,7 +74,7 @@ int main(int argc, char **argv) {
     noise_estimate = gold->n;
 
     /* PMI select for 1 layer */
-    ret = srslte_precoding_pmi_select(h, nof_symbols, noise_estimate, 1, &pmi[0], sinr_1l);
+    ret = srsran_precoding_pmi_select(h, nof_symbols, noise_estimate, 1, &pmi[0], sinr_1l);
     if (ret < 0) {
       ERROR("During PMI selection for 1 layer");
       goto clean;
@@ -87,21 +82,31 @@ int main(int argc, char **argv) {
 
     /* Check SINR for 1 layer */
     for (int i = 0; i < ret; i++) {
-      if (fabsf(gold->snri_1l[i] - sinr_1l[i]) > 0.1) {
-        ERROR("Test case %d failed computing 1 layer SINR for codebook %d (test=%.2f; gold=%.2f)\n",
-              c + 1, i, sinr_1l[i], gold->snri_1l[i]);
+      float err = fabsf(gold->snri_1l[i] - sinr_1l[i]);
+
+      // Normalise to prevent floating point rounding error
+      if (gold->snri_1l[i] > 1000.0f) {
+        err /= gold->snri_1l[i];
+      }
+
+      if (err > 0.1f) {
+        ERROR("Test case %d failed computing 1 layer SINR for codebook %d (test=%.2f; gold=%.2f)",
+              c + 1,
+              i,
+              sinr_1l[i],
+              gold->snri_1l[i]);
         goto clean;
       }
     }
 
     /* Check PMI select for 1 layer*/
     if (pmi[0] != gold->pmi[0]) {
-      ERROR("Test case %d failed computing 1 layer PMI (test=%d; gold=%d)\n", c + 1, pmi[0], gold->pmi[0]);
+      ERROR("Test case %d failed computing 1 layer PMI (test=%d; gold=%d)", c + 1, pmi[0], gold->pmi[0]);
       goto clean;
     }
 
     /* PMI select for 2 layer */
-    ret = srslte_precoding_pmi_select(h, nof_symbols, noise_estimate, 2, &pmi[1], sinr_2l);
+    ret = srsran_precoding_pmi_select(h, nof_symbols, noise_estimate, 2, &pmi[1], sinr_2l);
     if (ret < 0) {
       ERROR("During PMI selection for 2 layer");
       goto clean;
@@ -109,39 +114,48 @@ int main(int argc, char **argv) {
 
     /* Check SINR for 2 layer */
     for (int i = 0; i < ret; i++) {
-      if (fabsf(gold->snri_2l[i] - sinr_2l[i]) > 0.1) {
-        ERROR("Test case %d failed computing 2 layer SINR for codebook %d (test=%.2f; gold=%.2f)\n",
-              c + 1, i, sinr_2l[i], gold->snri_2l[i]);
+      float err = fabsf(gold->snri_2l[i] - sinr_2l[i]);
+
+      // Normalise to prevent floating point rounding error
+      if (gold->snri_2l[i] > 1000.0f) {
+        err /= gold->snri_2l[i];
+      }
+
+      if (err > 0.1f) {
+        ERROR("Test case %d failed computing 2 layer SINR for codebook %d (test=%.2f; gold=%.2f)",
+              c + 1,
+              i,
+              sinr_2l[i],
+              gold->snri_2l[i]);
         goto clean;
       }
     }
 
     /* Check PMI select for 2 layer*/
     if (pmi[1] != gold->pmi[1]) {
-      ERROR("Test case %d failed computing 2 layer PMI (test=%d; gold=%d)\n", c + 1, pmi[1], gold->pmi[1]);
+      ERROR("Test case %d failed computing 2 layer PMI (test=%d; gold=%d)", c + 1, pmi[1], gold->pmi[1]);
       goto clean;
     }
 
     /* Condition number */
-    if (srslte_precoding_cn(h, 2, 2, nof_symbols, &cn)) {
-      ERROR("Test case %d condition number returned error\n", c + 1);
+    if (srsran_precoding_cn(h, 2, 2, nof_symbols, &cn)) {
+      ERROR("Test case %d condition number returned error", c + 1);
       goto clean;
     }
 
     /* Check condition number */
     if (fabsf(gold->k - cn) > 0.1) {
-      ERROR("Test case %d failed computing condition number (test=%.2f; gold=%.2f)\n",
-            c + 1, cn, gold->k);
+      ERROR("Test case %d failed computing condition number (test=%.2f; gold=%.2f)", c + 1, cn, gold->k);
       goto clean;
     }
   }
 
   /* Test passed */
-  ret = SRSLTE_SUCCESS;
+  ret = SRSRAN_SUCCESS;
 
-  clean:
-  for (int i = 0; i < SRSLTE_MAX_PORTS; i++) {
-    for (int j = 0; j < SRSLTE_MAX_PORTS; j++) {
+clean:
+  for (int i = 0; i < SRSRAN_MAX_PORTS; i++) {
+    for (int j = 0; j < SRSRAN_MAX_PORTS; j++) {
       if (h[i][j]) {
         free(h[i][j]);
       }

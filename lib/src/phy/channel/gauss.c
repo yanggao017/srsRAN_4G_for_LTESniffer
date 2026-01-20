@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,20 +19,19 @@
  *
  */
 
-
-#include <string.h>
-#include <stdlib.h>
 #include <math.h>
+#include <stdlib.h>
 
-float rand_gauss (void) {
-  float v1,v2,s;
+float rand_gauss(void)
+{
+  float v1, v2, s;
 
   do {
-    v1 = 2.0 * ((float) rand()/RAND_MAX) - 1;
-    v2 = 2.0 * ((float) rand()/RAND_MAX) - 1;
+    v1 = 2.0 * (rand() / (float)RAND_MAX) - 1;
+    v2 = 2.0 * (rand() / (float)RAND_MAX) - 1;
 
-    s = v1*v1 + v2*v2;
-  } while ( s >= 1.0 || s == 0.0);
+    s = v1 * v1 + v2 * v2;
+  } while (s >= 1.0 || s == 0.0);
 
-    return (v1*sqrt(-2.0 * log(s) / s));
+  return (v1 * sqrtf(-2.0 * log(s) / s));
 }

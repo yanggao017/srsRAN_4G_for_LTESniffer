@@ -1,22 +1,28 @@
-
-## Fixed_sigover_injector
-
-### Fixed some issues 
-
-1. Fixed the Errors that may occur during the CMake and Make processes.
-
-2. Fixed the SIB2-AcBarringInfo(Change the inject subframe from subframe 1 to subframe 0)
-
-### TODO ISSUES
-
-1. The version of SRSLTE in the original project was too old and lacked the CFO automatic compensation function, which led to problems in synchronization and MIB decoding
-
-### Usage
-
-```bash
+# srsRAN_4G
+## for testing
+```
 mkdir build && cd build
+cmake ../
+make -j18
+```
 
-cmake .. -DENABLE_AVX2=OFF -DENABLE_AVX2_16BIT=OFF -DENABLE_SSE=ON
 
-make -j $(nproc)
+```./lib/examples/cell_search -b 1 -a type=x300,time_source=gpsdo -s 94 -e 104
+./lib/examples/pdsch_ue -f 2120e6 -d -E 100
+mkdir cache && mkdir cache/band_1 && mkdir cache/band_1/cell_420
+cp ../output/* cache/band_1/cell_420/
+./lib/test/common/gen_sample --type sib1_tac -c 420
+./lib/test/common/gen_sample --type sib2_acbarring -c 420
+./lib/test/common/gen_sample --type paging_sysinfmod -c 420
+./lib/test/common/gen_sample --type paging_imsi -c 420 -m 460017837217696
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type sib1_tac
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type sib2_acbarring
+./lib/examples/pdsch_enodeb -I UHD -x 1 -a type=x300,time_source=gpsdo -g 70 -c 420 --type paging_imsi
+```
+## for LTESniffer
+```
+cd LTESniffer
+mkdir build && cd build
+cmake .. -DENABLE_APPS=ON
+make -j18
 ```

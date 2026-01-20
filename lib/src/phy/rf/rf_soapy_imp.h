@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,104 +19,96 @@
  *
  */
 
+#ifndef SRSRAN_RF_SOAPY_IMP_H_
+#define SRSRAN_RF_SOAPY_IMP_H_
+
+#include "srsran/config.h"
+#include "srsran/phy/common/phy_common.h"
+#include "srsran/phy/rf/rf.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "srslte/config.h"
-#include "srslte/phy/rf/rf.h"
-#define DEVNAME_LIME "lime"
+#define DEVNAME_SOAPY "soapy"
 
-SRSLTE_API int rf_soapy_open(char *args,
-                             void **handler);
+extern rf_dev_t srsran_rf_dev_soapy;
 
-SRSLTE_API int rf_soapy_open_multi(char *args,
-                                   void **handler,
-                                   uint32_t nof_rx_antennas);
+SRSRAN_API int rf_soapy_open(char* args, void** handler);
 
-SRSLTE_API char* rf_soapy_devname(void *h);
+SRSRAN_API int rf_soapy_open_multi(char* args, void** handler, uint32_t num_requested_channels);
 
-SRSLTE_API int rf_soapy_close(void *h);
+SRSRAN_API const char* rf_soapy_devname(void* h);
 
-SRSLTE_API void rf_soapy_set_tx_cal(void *h, srslte_rf_cal_t *cal);
+SRSRAN_API int rf_soapy_close(void* h);
 
-SRSLTE_API void rf_soapy_set_rx_cal(void *h, srslte_rf_cal_t *cal);
+SRSRAN_API int rf_soapy_start_rx_stream(void* h, bool now);
 
-SRSLTE_API int rf_soapy_start_rx_stream(void *h, bool now);
+SRSRAN_API int rf_soapy_stop_rx_stream(void* h);
 
-SRSLTE_API int rf_soapy_stop_rx_stream(void *h);
+SRSRAN_API void rf_soapy_calibrate_tx(void* h);
 
-SRSLTE_API void rf_soapy_flush_buffer(void *h);
+SRSRAN_API void rf_soapy_flush_buffer(void* h);
 
-SRSLTE_API bool rf_soapy_has_rssi(void *h);
+SRSRAN_API bool rf_soapy_has_rssi(void* h);
 
-SRSLTE_API float rf_soapy_get_rssi(void *h); 
+SRSRAN_API float rf_soapy_get_rssi(void* h);
 
-SRSLTE_API bool rf_soapy_rx_wait_lo_locked(void *h);
+SRSRAN_API void rf_soapy_set_master_clock_rate(void* h, double rate);
 
-SRSLTE_API void rf_soapy_set_master_clock_rate(void *h, 
-                                               double rate); 
+SRSRAN_API double rf_soapy_set_rx_srate(void* h, double freq);
 
-SRSLTE_API bool rf_soapy_is_master_clock_dynamic(void *h); 
+SRSRAN_API int rf_soapy_set_rx_gain(void* h, double gain);
 
-SRSLTE_API double rf_soapy_set_rx_srate(void *h, 
-                                        double freq);
+SRSRAN_API int rf_soapy_set_rx_gain_ch(void* h, uint32_t ch, double gain);
 
-SRSLTE_API double rf_soapy_set_rx_gain(void *h, 
-                                       double gain);
+SRSRAN_API double rf_soapy_get_rx_gain(void* h);
 
-SRSLTE_API double rf_soapy_get_rx_gain(void *h);
+SRSRAN_API int rf_soapy_set_tx_gain(void* h, double gain);
 
-SRSLTE_API double rf_soapy_set_tx_gain(void *h,
-                                       double gain);
+SRSRAN_API int rf_soapy_set_tx_gain_ch(void* h, uint32_t ch, double gain);
 
-SRSLTE_API double rf_soapy_get_tx_gain(void *h);
+SRSRAN_API double rf_soapy_get_tx_gain(void* h);
 
-SRSLTE_API void rf_soapy_suppress_stdout(void *h);
+SRSRAN_API srsran_rf_info_t* rf_soapy_get_info(void* h);
 
-SRSLTE_API void rf_soapy_register_error_handler(void *h, srslte_rf_error_handler_t error_handler);
+SRSRAN_API void rf_soapy_suppress_stdout(void* h);
 
-SRSLTE_API double rf_soapy_set_rx_freq(void *h, 
-                                  double freq);
+SRSRAN_API void rf_soapy_register_error_handler(void* h, srsran_rf_error_handler_t error_handler, void* arg);
 
-SRSLTE_API int rf_soapy_recv_with_time(void *h,
-                                  void *data,
-                                  uint32_t nsamples,
-                                  bool blocking,
-                                  time_t *secs,
-                                  double *frac_secs);
+SRSRAN_API double rf_soapy_set_rx_freq(void* h, uint32_t ch, double freq);
 
-SRSLTE_API int rf_soapy_recv_with_time_multi(void *h,
-                                            void **data,
-                                            uint32_t nsamples,
-                                            bool blocking,
-                                            time_t *secs,
-                                            double *frac_secs);
+SRSRAN_API int
+rf_soapy_recv_with_time(void* h, void* data, uint32_t nsamples, bool blocking, time_t* secs, double* frac_secs);
 
-SRSLTE_API double rf_soapy_set_tx_srate(void *h, 
-                                    double freq);
+SRSRAN_API int rf_soapy_recv_with_time_multi(void*    h,
+                                             void*    data[SRSRAN_MAX_PORTS],
+                                             uint32_t nsamples,
+                                             bool     blocking,
+                                             time_t*  secs,
+                                             double*  frac_secs);
 
-SRSLTE_API double rf_soapy_set_tx_freq(void *h,
-                                   double freq);
+SRSRAN_API double rf_soapy_set_tx_srate(void* h, double freq);
 
-SRSLTE_API void rf_soapy_get_time(void *h, 
-                              time_t *secs, 
-                              double *frac_secs); 
+SRSRAN_API double rf_soapy_set_tx_freq(void* h, uint32_t ch, double freq);
 
-SRSLTE_API int rf_soapy_send_timed(void *h,
-                                  void *data, 
-                                  int nsamples,
-                                  time_t secs, 
-                                  double frac_secs, 
-                                  bool has_time_spec,
-                                  bool blocking, 
-                                  bool is_start_of_burst, 
-                                  bool is_end_of_burst);
+SRSRAN_API void rf_soapy_get_time(void* h, time_t* secs, double* frac_secs);
 
-int rf_soapy_send_timed_multi(void *h,
-                              void *data[4],
-                              int nsamples,
+SRSRAN_API int rf_soapy_send_timed(void*  h,
+                                   void*  data,
+                                   int    nsamples,
+                                   time_t secs,
+                                   double frac_secs,
+                                   bool   has_time_spec,
+                                   bool   blocking,
+                                   bool   is_start_of_burst,
+                                   bool   is_end_of_burst);
+
+int rf_soapy_send_timed_multi(void*  h,
+                              void*  data[4],
+                              int    nsamples,
                               time_t secs,
                               double frac_secs,
-                              bool has_time_spec,
-                              bool blocking,
-                              bool is_start_of_burst,
-                              bool is_end_of_burst);
+                              bool   has_time_spec,
+                              bool   blocking,
+                              bool   is_start_of_burst,
+                              bool   is_end_of_burst);
+
+#endif /* SRSRAN_RF_SOAPY_IMP_H_ */

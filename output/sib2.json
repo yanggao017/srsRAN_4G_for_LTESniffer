@@ -1,0 +1,94 @@
+{
+  "radioResourceConfigCommon": {
+    "rach-ConfigCommon": {
+      "preambleInfo": {
+        "numberOfRA-Preambles": "n52",
+        "preamblesGroupAConfig": {
+          "sizeOfRA-PreamblesGroupA": "n28",
+          "messageSizeGroupA": "b56",
+          "messagePowerOffsetGroupB": "dB10"
+        }
+      },
+      "powerRampingParameters": {
+        "powerRampingStep": "dB4",
+        "preambleInitialReceivedTargetPower": "dBm-104"
+      },
+      "ra-SupervisionInfo": {
+        "preambleTransMax": "n10",
+        "ra-ResponseWindowSize": "sf10",
+        "mac-ContentionResolutionTimer": "sf64"
+      },
+      "maxHARQ-Msg3Tx": 5
+    },
+    "bcch-Config": {
+      "modificationPeriodCoeff": "n2"
+    },
+    "pcch-Config": {
+      "defaultPagingCycle": "rf64",
+      "nB": "oneT"
+    },
+    "prach-Config": {
+      "rootSequenceIndex": 758,
+      "prach-ConfigInfo": {
+        "prach-ConfigIndex": 6,
+        "highSpeedFlag": false,
+        "zeroCorrelationZoneConfig": 1,
+        "prach-FreqOffset": 6
+      }
+    },
+    "pdsch-ConfigCommon": {
+      "referenceSignalPower": -10,
+      "p-b": 0
+    },
+    "pusch-ConfigCommon": {
+      "pusch-ConfigBasic": {
+        "n-SB": 4,
+        "hoppingMode": "interSubFrame",
+        "pusch-HoppingOffset": 0,
+        "enable64QAM": true
+      },
+      "ul-ReferenceSignalsPUSCH": {
+        "groupHoppingEnabled": false,
+        "groupAssignmentPUSCH": 0,
+        "sequenceHoppingEnabled": false,
+        "cyclicShift": 0
+      }
+    },
+    "pucch-ConfigCommon": {
+      "deltaPUCCH-Shift": "ds1",
+      "nRB-CQI": 1,
+      "nCS-AN": 0,
+      "n1PUCCH-AN": 18
+    },
+    "soundingRS-UL-ConfigCommon": {
+    },
+    "uplinkPowerControlCommon": {
+      "p0-NominalPUSCH": -67,
+      "alpha": "al07",
+      "p0-NominalPUCCH": -115,
+      "deltaFList-PUCCH": {
+        "deltaF-PUCCH-Format1": "deltaF0",
+        "deltaF-PUCCH-Format1b": "deltaF3",
+        "deltaF-PUCCH-Format2": "deltaF1",
+        "deltaF-PUCCH-Format2a": "deltaF2",
+        "deltaF-PUCCH-Format2b": "deltaF2"
+      },
+      "deltaPreambleMsg3": 4
+    },
+    "ul-CyclicPrefixLength": "len1"
+  },
+  "ue-TimersAndConstants": {
+    "t300": "ms1000",
+    "t301": "ms200",
+    "t310": "ms1000",
+    "n310": "n10",
+    "t311": "ms10000",
+    "n311": "n1"
+  },
+  "freqInfo": {
+    "ul-Bandwidth": "n100",
+    "additionalSpectrumEmission": 1
+  },
+  "timeAlignmentTimerCommon": "infinity",
+  "voiceServiceCauseIndication-r12": "true"
+}

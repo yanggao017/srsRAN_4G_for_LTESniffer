@@ -1,3 +1,23 @@
+#
+# Copyright 2013-2023 Software Radio Systems Limited
+#
+# This file is part of srsRAN
+#
+# srsRAN is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of
+# the License, or (at your option) any later version.
+#
+# srsRAN is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Affero General Public License for more details.
+#
+# A copy of the GNU Affero General Public License can be found in
+# the LICENSE file in the top-level directory of this distribution
+# and at http://www.gnu.org/licenses/.
+#
+
 # Find the CUnit includes and library
 #
 # This module defines
@@ -14,31 +34,37 @@
 FIND_PATH(LIBCONFIG_INCLUDE_DIR libconfig.h
   /usr/local/include
   /usr/include
+        /usr/lib/x86_64-linux-gnu/
 )
 
 FIND_PATH(LIBCONFIGPP_INCLUDE_DIR libconfig.h++
   /usr/local/include
   /usr/include
+  /usr/lib/x86_64-linux-gnu/
 )
 
 FIND_LIBRARY(LIBCONFIG_LIBRARY config
   /usr/local/lib
   /usr/lib
+  /usr/lib/x86_64-linux-gnu/
 )
 
 FIND_LIBRARY(LIBCONFIGPP_LIBRARY config++
   /usr/local/lib
   /usr/lib
+  /usr/lib/x86_64-linux-gnu/
 )
 
 FIND_LIBRARY(LIBCONFIG_STATIC_LIBRARY "libconfig${CMAKE_STATIC_LIBRARY_SUFFIX}"
   /usr/local/lib
   /usr/lib
+  /usr/lib/x86_64-linux-gnu/
 )
 
 FIND_LIBRARY(LIBCONFIGPP_STATIC_LIBRARY "libconfig++${CMAKE_STATIC_LIBRARY_SUFFIX}"
-    /usr/local/lib
-    /usr/lib
+  /usr/local/lib
+  /usr/lib
+  /usr/lib/x86_64-linux-gnu/
 )
 
 

@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,253 +19,174 @@
  *
  */
 
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
-#include <strings.h>
-#include <stdlib.h>
-#include <stdbool.h>
+#include "srsran/srsran.h"
 #include <assert.h>
 #include <math.h>
-#include <srslte/srslte.h>
-#include <srslte/phy/phch/pusch.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 
-#include "srslte/phy/ch_estimation/refsignal_ul.h"
-#include "srslte/phy/phch/pusch.h"
-#include "srslte/phy/phch/pusch_cfg.h"
-#include "srslte/phy/phch/uci.h"
-#include "srslte/phy/common/phy_common.h"
-#include "srslte/phy/utils/bit.h"
-#include "srslte/phy/utils/debug.h"
-#include "srslte/phy/utils/vector.h"
-#include "srslte/phy/dft/dft_precoding.h"
+#include "srsran/phy/ch_estimation/refsignal_ul.h"
+#include "srsran/phy/common/phy_common.h"
+#include "srsran/phy/dft/dft_precoding.h"
+#include "srsran/phy/phch/pusch.h"
+#include "srsran/phy/phch/pusch_cfg.h"
+#include "srsran/phy/phch/uci.h"
+#include "srsran/phy/utils/bit.h"
+#include "srsran/phy/utils/debug.h"
+#include "srsran/phy/utils/vector.h"
 
-#define MAX_PUSCH_RE(cp) (2 * SRSLTE_CP_NSYMB(cp) * 12)
+#define MAX_PUSCH_RE(cp) (2 * SRSRAN_CP_NSYMB(cp) * 12)
 
-
-
-const static srslte_mod_t modulations[4] =
-    { SRSLTE_MOD_BPSK, SRSLTE_MOD_QPSK, SRSLTE_MOD_16QAM, SRSLTE_MOD_64QAM };
-    
-static int f_hop_sum(srslte_pusch_t *q, uint32_t i) {
-  uint32_t sum = 0;
-  for (uint32_t k=i*10+1;k<i*10+9;i++) {
-    sum += (q->seq_type2_fo.c[k]<<(k-(i*10+1)));
-  }
-  return sum; 
-}
-    
-static int f_hop(srslte_pusch_t *q, srslte_pusch_hopping_cfg_t *hopping, int i) {
-  if (i == -1) {
-    return 0; 
-  } else {
-    if (hopping->n_sb == 1) {
-      return 0;
-    } else if (hopping->n_sb == 2) {
-      return (f_hop(q, hopping, i-1) + f_hop_sum(q, i))%2;
-    } else {
-      return (f_hop(q, hopping, i-1) + f_hop_sum(q, i)%(hopping->n_sb-1)+1)%hopping->n_sb;   
-    }    
-  }
-}
-
-static int f_m(srslte_pusch_t *q, srslte_pusch_hopping_cfg_t *hopping, uint32_t i, uint32_t current_tx_nb) {
-  if (hopping->n_sb == 1) {
-    if (hopping->hop_mode == SRSLTE_PUSCH_HOP_MODE_INTER_SF) {
-      return current_tx_nb%2;
-    } else {
-      return i%2;      
-    }
-  } else {
-    return q->seq_type2_fo.c[i*10];
-  }
-}
-
-/* Computes PUSCH frequency hopping as defined in Section 8.4 of 36.213 */
-void compute_freq_hopping(srslte_pusch_t *q, srslte_ra_ul_grant_t *grant, 
-                               srslte_pusch_hopping_cfg_t *hopping, 
-                               uint32_t sf_idx, uint32_t current_tx_nb) 
-{
-  
-  for (uint32_t slot=0;slot<2;slot++) {    
-
-    INFO("PUSCH Freq hopping: %d\n", grant->freq_hopping);
-    uint32_t n_prb_tilde = grant->n_prb[slot]; 
-    
-    if (grant->freq_hopping == 1) {
-      if (hopping->hop_mode == SRSLTE_PUSCH_HOP_MODE_INTER_SF) {
-        n_prb_tilde = grant->n_prb[current_tx_nb%2];      
-      } else {
-        n_prb_tilde = grant->n_prb[slot];
-      }
-    }
-    if (grant->freq_hopping == 2) {
-      /* Freq hopping type 2 as defined in 5.3.4 of 36.211 */
-      uint32_t n_vrb_tilde = grant->n_prb[0];
-      if (hopping->n_sb > 1) {
-        n_vrb_tilde -= (hopping->hopping_offset-1)/2+1;
-      }
-      int i=0;
-      if (hopping->hop_mode == SRSLTE_PUSCH_HOP_MODE_INTER_SF) {
-        i = sf_idx;
-      } else {
-        i = 2*sf_idx+slot;
-      }
-      uint32_t n_rb_sb = q->cell.nof_prb;
-      if (hopping->n_sb > 1) {
-        n_rb_sb = (n_rb_sb-hopping->hopping_offset-hopping->hopping_offset%2)/hopping->n_sb;
-      }
-      n_prb_tilde = (n_vrb_tilde+f_hop(q, hopping, i)*n_rb_sb+
-        (n_rb_sb-1)-2*(n_vrb_tilde%n_rb_sb)*f_m(q, hopping, i, current_tx_nb))%(n_rb_sb*hopping->n_sb);
-      
-      INFO("n_prb_tilde: %d, n_vrb_tilde: %d, n_rb_sb: %d, n_sb: %d\n", 
-           n_prb_tilde, n_vrb_tilde, n_rb_sb, hopping->n_sb);
-      if (hopping->n_sb > 1) {
-        n_prb_tilde += (hopping->hopping_offset-1)/2+1;
-      }
-      
-    }
-    grant->n_prb_tilde[slot] = n_prb_tilde; 
-  }
-}
-
+#define ACK_SNR_TH -1.0
 
 /* Allocate/deallocate PUSCH RBs to the resource grid
  */
-int pusch_cp(srslte_pusch_t *q, srslte_ra_ul_grant_t *grant, cf_t *input, cf_t *output, bool advance_input) 
+static int pusch_cp(srsran_pusch_t*       q,
+                    srsran_pusch_grant_t* grant,
+                    cf_t*                 input,
+                    cf_t*                 output,
+                    bool                  is_shortened,
+                    bool                  advance_input)
 {
-  cf_t *in_ptr = input; 
-  cf_t *out_ptr = output; 
-  
+  cf_t* in_ptr  = input;
+  cf_t* out_ptr = output;
+
   uint32_t L_ref = 3;
-  if (SRSLTE_CP_ISEXT(q->cell.cp)) {
-    L_ref = 2; 
+  if (SRSRAN_CP_ISEXT(q->cell.cp)) {
+    L_ref = 2;
   }
-  for (uint32_t slot=0;slot<2;slot++) {        
-    uint32_t N_srs = 0; 
-    if (q->shortened && slot == 1) {
-      N_srs = 1; 
+  for (uint32_t slot = 0; slot < 2; slot++) {
+    uint32_t N_srs = 0;
+    if (is_shortened && slot == 1) {
+      N_srs = 1;
     }
-    INFO("%s PUSCH %d PRB to index %d at slot %d\n",advance_input?"Allocating":"Getting",grant->L_prb, grant->n_prb_tilde[slot], slot);
-    for (uint32_t l=0;l<SRSLTE_CP_NSYMB(q->cell.cp)-N_srs;l++) {
+    INFO("%s PUSCH %d PRB to index %d at slot %d",
+         advance_input ? "Allocating" : "Getting",
+         grant->L_prb,
+         grant->n_prb_tilde[slot],
+         slot);
+    for (uint32_t l = 0; l < SRSRAN_CP_NSYMB(q->cell.cp) - N_srs; l++) {
       if (l != L_ref) {
-        uint32_t idx = SRSLTE_RE_IDX(q->cell.nof_prb, l+slot*SRSLTE_CP_NSYMB(q->cell.cp), 
-                              grant->n_prb_tilde[slot]*SRSLTE_NRE);
+        uint32_t idx = SRSRAN_RE_IDX(
+            q->cell.nof_prb, l + slot * SRSRAN_CP_NSYMB(q->cell.cp), grant->n_prb_tilde[slot] * SRSRAN_NRE);
         if (advance_input) {
-          out_ptr = &output[idx]; 
+          out_ptr = &output[idx];
         } else {
           in_ptr = &input[idx];
-        }              
-        memcpy(out_ptr, in_ptr, grant->L_prb * SRSLTE_NRE * sizeof(cf_t));                       
+        }
+        memcpy(out_ptr, in_ptr, grant->L_prb * SRSRAN_NRE * sizeof(cf_t));
         if (advance_input) {
-          in_ptr += grant->L_prb*SRSLTE_NRE;
+          in_ptr += grant->L_prb * SRSRAN_NRE;
         } else {
-          out_ptr += grant->L_prb*SRSLTE_NRE; 
+          out_ptr += grant->L_prb * SRSRAN_NRE;
         }
       }
-    }        
+    }
   }
   if (advance_input) {
     return in_ptr - input;
   } else {
-    return out_ptr - output; 
+    return out_ptr - output;
   }
 }
 
-int pusch_put(srslte_pusch_t *q, srslte_ra_ul_grant_t *grant, cf_t *input, cf_t *output) {
-  return pusch_cp(q, grant, input, output, true);
+static int pusch_put(srsran_pusch_t* q, srsran_pusch_grant_t* grant, cf_t* input, cf_t* output, bool is_shortened)
+{
+  return pusch_cp(q, grant, input, output, is_shortened, true);
 }
 
-int pusch_get(srslte_pusch_t *q, srslte_ra_ul_grant_t *grant, cf_t *input, cf_t *output) {
-  return pusch_cp(q, grant, input, output, false);
+static int pusch_get(srsran_pusch_t* q, srsran_pusch_grant_t* grant, cf_t* input, cf_t* output, bool is_shortened)
+{
+  return pusch_cp(q, grant, input, output, is_shortened, false);
 }
-
 
 /** Initializes the PDCCH transmitter and receiver */
-int pusch_init(srslte_pusch_t *q, uint32_t max_prb, bool is_ue) {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS;
-  int i;
+static int pusch_init(srsran_pusch_t* q, uint32_t max_prb, bool is_ue)
+{
+  int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
- if (q != NULL)
-  {   
-    
-    bzero(q, sizeof(srslte_pusch_t));
-    ret = SRSLTE_ERROR;
-    q->max_re = max_prb * MAX_PUSCH_RE(SRSLTE_CP_NORM);
+  if (q != NULL) {
+    bzero(q, sizeof(srsran_pusch_t));
+    ret       = SRSRAN_ERROR;
+    q->max_re = max_prb * MAX_PUSCH_RE(SRSRAN_CP_NORM);
 
-    INFO("Init PUSCH: %d PRBs\n", max_prb);
+    INFO("Init PUSCH: %d PRBs", max_prb);
 
-    for (i = 0; i < 4; i++) {
-      if (srslte_modem_table_lte(&q->mod[i], modulations[i])) {
+    for (srsran_mod_t i = 0; i < SRSRAN_MOD_NITEMS; i++) {
+      if (srsran_modem_table_lte(&q->mod[i], i)) {
         goto clean;
       }
-      srslte_modem_table_bytes(&q->mod[i]);
+      srsran_modem_table_bytes(&q->mod[i]);
     }
 
     q->is_ue = is_ue;
 
-    q->users = calloc(sizeof(srslte_pusch_user_t*), q->is_ue?1:(1+SRSLTE_SIRNTI));
-    if (!q->users) {
-      perror("malloc");
+    srsran_sch_init(&q->ul_sch);
+
+    if (srsran_dft_precoding_init(&q->dft_precoding, max_prb, is_ue)) {
+      ERROR("Error initiating DFT transform precoding");
       goto clean;
-    }
-
-    if (srslte_sequence_init(&q->tmp_seq, q->max_re * srslte_mod_bits_x_symbol(SRSLTE_MOD_64QAM))) {
-      goto clean;
-    }
-
-    srslte_sch_init(&q->ul_sch);
-
-    if (srslte_dft_precoding_init(&q->dft_precoding, max_prb, is_ue)) {
-      fprintf(stderr, "Error initiating DFT transform precoding\n");
-      goto clean; 
     }
 
     // Allocate int16 for reception (LLRs). Buffer casted to uint8_t for transmission
-    q->q = srslte_vec_malloc(sizeof(int16_t) * q->max_re * srslte_mod_bits_x_symbol(SRSLTE_MOD_64QAM));
+    q->q = srsran_vec_i16_malloc(q->max_re * srsran_mod_bits_x_symbol(SRSRAN_MOD_64QAM));
     if (!q->q) {
       goto clean;
     }
 
     // Allocate int16 for reception (LLRs). Buffer casted to uint8_t for transmission
-    q->g = srslte_vec_malloc(sizeof(int16_t) * q->max_re * srslte_mod_bits_x_symbol(SRSLTE_MOD_64QAM));
+    q->g = srsran_vec_i16_malloc(q->max_re * srsran_mod_bits_x_symbol(SRSRAN_MOD_64QAM));
     if (!q->g) {
       goto clean;
     }
-    q->d = srslte_vec_malloc(sizeof(cf_t) * q->max_re);
+    q->d = srsran_vec_cf_malloc(q->max_re);
     if (!q->d) {
-      goto clean; 
+      goto clean;
     }
 
+    // Allocate eNb specific buffers
     if (!q->is_ue) {
-      q->ce = srslte_vec_malloc(sizeof(cf_t) * q->max_re);
+      q->ce = srsran_vec_cf_malloc(q->max_re);
       if (!q->ce) {
         goto clean;
       }
+
+      q->evm_buffer = srsran_evm_buffer_alloc(srsran_ra_tbs_from_idx(SRSRAN_RA_NOF_TBS_IDX - 1, 6));
+      if (!q->evm_buffer) {
+        ERROR("Allocating EVM buffer");
+        goto clean;
+      }
     }
-    q->z = srslte_vec_malloc(sizeof(cf_t) * q->max_re);
+    q->z = srsran_vec_cf_malloc(q->max_re);
     if (!q->z) {
       goto clean;
     }
 
-    ret = SRSLTE_SUCCESS;
+    ret = SRSRAN_SUCCESS;
   }
-  clean: 
-  if (ret == SRSLTE_ERROR) {
-    srslte_pusch_free(q);
+clean:
+  if (ret == SRSRAN_ERROR) {
+    srsran_pusch_free(q);
   }
   return ret;
 }
 
-int srslte_pusch_init_ue(srslte_pusch_t *q, uint32_t max_prb) {
+int srsran_pusch_init_ue(srsran_pusch_t* q, uint32_t max_prb)
+{
   return pusch_init(q, max_prb, true);
 }
 
-int srslte_pusch_init_enb(srslte_pusch_t *q, uint32_t max_prb) {
+int srsran_pusch_init_enb(srsran_pusch_t* q, uint32_t max_prb)
+{
   return pusch_init(q, max_prb, false);
 }
 
-void srslte_pusch_free(srslte_pusch_t *q) {
+void srsran_pusch_free(srsran_pusch_t* q)
+{
   int i;
 
   if (q->q) {
@@ -288,366 +204,338 @@ void srslte_pusch_free(srslte_pusch_t *q) {
   if (q->z) {
     free(q->z);
   }
-  
-  srslte_dft_precoding_free(&q->dft_precoding);
-
-  if (q->users) {
-    if (q->is_ue) {
-      srslte_pusch_free_rnti(q, 0);
-    } else {
-      for (int rnti=0;rnti<=SRSLTE_SIRNTI;rnti++) {
-        srslte_pusch_free_rnti(q, rnti);
-      }
-    }
-    free(q->users);
+  if (q->evm_buffer) {
+    srsran_evm_free(q->evm_buffer);
   }
+  srsran_dft_precoding_free(&q->dft_precoding);
 
-  srslte_sequence_free(&q->seq_type2_fo);
-  
-  srslte_sequence_free(&q->tmp_seq);
-  
-  for (i = 0; i < 4; i++) {
-    srslte_modem_table_free(&q->mod[i]);
+  for (i = 0; i < SRSRAN_MOD_NITEMS; i++) {
+    srsran_modem_table_free(&q->mod[i]);
   }
-  srslte_sch_free(&q->ul_sch);
+  srsran_sch_free(&q->ul_sch);
 
-  bzero(q, sizeof(srslte_pusch_t));
-
+  bzero(q, sizeof(srsran_pusch_t));
 }
 
-int srslte_pusch_set_cell(srslte_pusch_t *q, srslte_cell_t cell) {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS;
+int srsran_pusch_set_cell(srsran_pusch_t* q, srsran_cell_t cell)
+{
+  int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-  if (q != NULL && srslte_cell_isvalid(&cell))
-  {
-
-    q->max_re = cell.nof_prb * MAX_PUSCH_RE(q->cell.cp);
-
-    INFO("PUSCH: Cell config PCI=%d, %d ports %d PRBs, max_symbols: %d\n",
-         q->cell.id, q->cell.nof_ports, q->cell.nof_prb, q->max_re);
-
-    if (q->cell.id != cell.id || q->cell.nof_prb == 0) {
-      memcpy(&q->cell, &cell, sizeof(srslte_cell_t));
-      /* Precompute sequence for type2 frequency hopping */
-      if (srslte_sequence_LTE_pr(&q->seq_type2_fo, 210, q->cell.id)) {
-        fprintf(stderr, "Error initiating type2 frequency hopping sequence\n");
-        return SRSLTE_ERROR;
-      }
-
+  if (q != NULL && srsran_cell_isvalid(&cell)) {
+    // Resize EVM buffer, only for eNb
+    if (!q->is_ue && q->evm_buffer) {
+      srsran_evm_buffer_resize(q->evm_buffer, srsran_ra_tbs_from_idx(SRSRAN_RA_NOF_TBS_IDX - 1, cell.nof_prb));
     }
-    ret = SRSLTE_SUCCESS;
+
+    q->cell   = cell;
+    q->max_re = cell.nof_prb * MAX_PUSCH_RE(cell.cp);
+    ret       = SRSRAN_SUCCESS;
   }
   return ret;
 }
 
-
-
-/* Configures the structure srslte_pusch_cfg_t from the UL DCI allocation dci_msg. 
- * If dci_msg is NULL, the grant is assumed to be already stored in cfg->grant
- */
-int srslte_pusch_cfg(srslte_pusch_t             *q, 
-                     srslte_pusch_cfg_t         *cfg, 
-                     srslte_ra_ul_grant_t       *grant, 
-                     srslte_uci_cfg_t           *uci_cfg, 
-                     srslte_pusch_hopping_cfg_t *hopping_cfg, 
-                     srslte_refsignal_srs_cfg_t *srs_cfg, 
-                     uint32_t tti, 
-                     uint32_t rv_idx, 
-                     uint32_t current_tx_nb) 
+int srsran_pusch_assert_grant(const srsran_pusch_grant_t* grant)
 {
-  if (q && cfg && grant) {
-    memcpy(&cfg->grant, grant, sizeof(srslte_ra_ul_grant_t));
-    
-    if (srslte_cbsegm(&cfg->cb_segm, cfg->grant.mcs.tbs)) {
-      fprintf(stderr, "Error computing Codeblock segmentation for TBS=%d\n", cfg->grant.mcs.tbs);
-      return SRSLTE_ERROR; 
-    }
-    
-    /* Compute PUSCH frequency hopping */
-    if (hopping_cfg) {
-      compute_freq_hopping(q, &cfg->grant, hopping_cfg, tti%10, current_tx_nb);
-    } else {
-      cfg->grant.n_prb_tilde[0] = cfg->grant.n_prb[0];
-      cfg->grant.n_prb_tilde[1] = cfg->grant.n_prb[1];
-    }
-    if (srs_cfg) {
-      q->shortened = false; 
-      if (srs_cfg->configured) {
-        // If UE-specific SRS is configured, PUSCH is shortened every time UE transmits SRS even if overlaping in the same RB or not
-        if (srslte_refsignal_srs_send_cs(srs_cfg->subframe_config, tti%10) == 1 && 
-            srslte_refsignal_srs_send_ue(srs_cfg->I_srs, tti) == 1)
-        {
-          q->shortened = true; 
-          /* If RBs are contiguous, PUSCH is not shortened */
-          uint32_t k0_srs = srslte_refsignal_srs_rb_start_cs(srs_cfg->bw_cfg, q->cell.nof_prb);
-          uint32_t nrb_srs = srslte_refsignal_srs_rb_L_cs(srs_cfg->bw_cfg, q->cell.nof_prb);
-          for (uint32_t ns=0;ns<2 && q->shortened;ns++) {
-            if (cfg->grant.n_prb_tilde[ns] == k0_srs + nrb_srs ||         // If PUSCH is contiguous on the right-hand side of SRS
-                cfg->grant.n_prb_tilde[ns] + cfg->grant.L_prb == k0_srs)  // If SRS is contiguous on the left-hand side of PUSCH
-            {
-              q->shortened = false; 
-            }
-          }
-        }
-        // If not coincides with UE transmission. PUSCH shall be shortened if cell-specific SRS transmission RB 
-        //coincides with PUSCH allocated RB
-        if (!q->shortened) {
-          if (srslte_refsignal_srs_send_cs(srs_cfg->subframe_config, tti%10) == 1) {
-            uint32_t k0_srs = srslte_refsignal_srs_rb_start_cs(srs_cfg->bw_cfg, q->cell.nof_prb);
-            uint32_t nrb_srs = srslte_refsignal_srs_rb_L_cs(srs_cfg->bw_cfg, q->cell.nof_prb);
-            for (uint32_t ns=0;ns<2 && !q->shortened;ns++) {
-              if ((cfg->grant.n_prb_tilde[ns] >= k0_srs && cfg->grant.n_prb_tilde[ns] < k0_srs + nrb_srs) || 
-                  (cfg->grant.n_prb_tilde[ns] + cfg->grant.L_prb >= k0_srs && 
-                        cfg->grant.n_prb_tilde[ns] + cfg->grant.L_prb < k0_srs + nrb_srs) ||
-                  (cfg->grant.n_prb_tilde[ns] <= k0_srs && cfg->grant.n_prb_tilde[ns] + cfg->grant.L_prb >= k0_srs + nrb_srs))
-              {            
-                q->shortened = true; 
-              }
-            }
-          }
-        }
-      }    
-    } 
-    
-    /* Compute final number of bits and RE */
-    srslte_ra_ul_grant_to_nbits(&cfg->grant, q->cell.cp, q->shortened?1:0, &cfg->nbits);
-
-    cfg->sf_idx = tti%10; 
-    cfg->tti    = tti; 
-    cfg->rv     = rv_idx; 
-    cfg->cp     = q->cell.cp; 
-    
-    // Save UCI configuration 
-    if (uci_cfg) {
-      memcpy(&cfg->uci_cfg, uci_cfg, sizeof(srslte_uci_cfg_t));
-    }
-    
-    return SRSLTE_SUCCESS;      
-  } else {
-    return SRSLTE_ERROR_INVALID_INPUTS;
+  // Check for valid number of PRB
+  if (!srsran_dft_precoding_valid_prb(grant->L_prb)) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
   }
-}
 
-/* Precalculate the PUSCH scramble sequences for a given RNTI. This function takes a while 
- * to execute, so shall be called once the final C-RNTI has been allocated for the session.
- * For the connection procedure, use srslte_pusch_encode() functions */
-int srslte_pusch_set_rnti(srslte_pusch_t *q, uint16_t rnti) {
-  uint32_t i;
-
-  uint32_t rnti_idx = q->is_ue?0:rnti;
-
-  if (!q->users[rnti_idx] || q->is_ue) {
-    if (!q->users[rnti_idx]) {
-      q->users[rnti_idx] = calloc(1, sizeof(srslte_pusch_user_t));
-      if (!q->users[rnti_idx]) {
-        perror("calloc");
-        return -1;
-      }
-    }
-    for (i = 0; i < SRSLTE_NSUBFRAMES_X_FRAME; i++) {
-      if (srslte_sequence_pusch(&q->users[rnti_idx]->seq[i], rnti, 2 * i, q->cell.id,
-                                q->max_re * srslte_mod_bits_x_symbol(SRSLTE_MOD_64QAM)))
-      {
-        fprintf(stderr, "Error initializing PUSCH scrambling sequence\n");
-        srslte_pusch_free_rnti(q, rnti);
-        return SRSLTE_ERROR;
-      }
-    }
-    q->ue_rnti = rnti;
-    q->users[rnti_idx]->cell_id = q->cell.id;
-    q->users[rnti_idx]->sequence_generated = true;
-  } else {
-    fprintf(stderr, "Error generating PUSCH sequence: rnti=0x%x already generated\n", rnti);
+  // Check RV limits, -1 is for RAR, 0-3 normal HARQ
+  if (grant->tb.rv < -1 || grant->tb.rv > 3) {
+    return SRSRAN_ERROR_OUT_OF_BOUNDS;
   }
-  return SRSLTE_SUCCESS;
-}
 
-void srslte_pusch_free_rnti(srslte_pusch_t *q, uint16_t rnti) {
-
-  uint32_t rnti_idx = q->is_ue?0:rnti;
-
-  if (q->users[rnti_idx]) {
-    for (int i = 0; i < SRSLTE_NSUBFRAMES_X_FRAME; i++) {
-      srslte_sequence_free(&q->users[rnti_idx]->seq[i]);
-    }    
-    free(q->users[rnti_idx]);
-    q->users[rnti_idx] = NULL;
-    q->ue_rnti = 0;
+  // Check for positive TBS
+  if (grant->tb.tbs < 0) {
+    return SRSRAN_ERROR_OUT_OF_BOUNDS;
   }
-}
 
-static srslte_sequence_t *get_user_sequence(srslte_pusch_t *q, uint16_t rnti, uint32_t sf_idx, uint32_t len)
-{
-  uint32_t rnti_idx = q->is_ue?0:rnti;
-
-  // The scrambling sequence is pregenerated for all RNTIs in the eNodeB but only for C-RNTI in the UE
-  if (q->users[rnti_idx] && q->users[rnti_idx]->sequence_generated &&
-      q->users[rnti_idx]->cell_id == q->cell.id                    &&
-      q->ue_rnti == rnti                                           &&
-      ((rnti >= SRSLTE_CRNTI_START && rnti < SRSLTE_CRNTI_END) || !q->is_ue))
-  {
-    return &q->users[rnti_idx]->seq[sf_idx];
-  } else {
-    srslte_sequence_pusch(&q->tmp_seq, rnti, 2 * sf_idx, q->cell.id, len);
-    return &q->tmp_seq;
-  }
+  return SRSRAN_SUCCESS;
 }
 
 /** Converts the PUSCH data bits to symbols mapped to the slot ready for transmission
  */
-int srslte_pusch_encode(srslte_pusch_t *q, srslte_pusch_cfg_t *cfg, srslte_softbuffer_tx_t *softbuffer,
-                        uint8_t *data, srslte_uci_data_t uci_data, uint16_t rnti, 
-                        cf_t *sf_symbols) 
+int srsran_pusch_encode(srsran_pusch_t*      q,
+                        srsran_ul_sf_cfg_t*  sf,
+                        srsran_pusch_cfg_t*  cfg,
+                        srsran_pusch_data_t* data,
+                        cf_t*                sf_symbols)
 {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS; 
-   
-  if (q    != NULL &&
-      cfg  != NULL)
-  {
+  int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-    if (cfg->nbits.nof_re > q->max_re) {
-      fprintf(stderr, "Error too many RE per subframe (%d). PUSCH configured for %d RE (%d PRB)\n",
-          cfg->nbits.nof_re, q->max_re, q->cell.nof_prb);
-      return SRSLTE_ERROR_INVALID_INPUTS;
-    }
-
-    INFO("Encoding PUSCH SF: %d, Mod %s, RNTI: %d, TBS: %d, NofRE: %d, NofSymbols=%d, NofBitsE: %d, rv_idx: %d\n",
-         cfg->sf_idx, srslte_mod_string(cfg->grant.mcs.mod), rnti, 
-         cfg->grant.mcs.tbs, cfg->nbits.nof_re, cfg->nbits.nof_symb, cfg->nbits.nof_bits, cfg->rv);
-    
-    bzero(q->q, cfg->nbits.nof_bits);
-    if (srslte_ulsch_uci_encode(&q->ul_sch, cfg, softbuffer, data, uci_data, q->g, q->q)) {
-      fprintf(stderr, "Error encoding TB\n");
-      return SRSLTE_ERROR;
-    }
-
-    // Generate scrambling sequence if not pre-generated
-    srslte_sequence_t *seq = get_user_sequence(q, rnti, cfg->sf_idx, cfg->nbits.nof_bits);
-
-    // Run scrambling
-    srslte_scrambling_bytes(seq, (uint8_t*) q->q, cfg->nbits.nof_bits);
-
-    // Correct UCI placeholder/repetition bits
-    uint8_t *d = q->q; 
-    for (int i = 0; i < q->ul_sch.nof_ri_ack_bits; i++) {     
-      if (q->ul_sch.ack_ri_bits[i].type == UCI_BIT_PLACEHOLDER) {
-        d[q->ul_sch.ack_ri_bits[i].position/8] |= (1<<(7-q->ul_sch.ack_ri_bits[i].position%8)); 
-      } else if (q->ul_sch.ack_ri_bits[i].type == UCI_BIT_REPETITION) {
-        if (q->ul_sch.ack_ri_bits[i].position > 1) {
-          uint32_t p=q->ul_sch.ack_ri_bits[i].position;
-          uint8_t bit = d[(p-1)/8] & (1<<(7-(p-1)%8)); 
-          if (bit) {
-            d[p/8] |= 1<<(7-p%8);
-          } else {
-            d[p/8] &= ~(1<<(7-p%8));
-          }
-        } 
+  if (q != NULL && cfg != NULL) {
+    /* Limit UL modulation if not supported by the UE or disabled by higher layers */
+    if (!cfg->enable_64qam) {
+      if (cfg->grant.tb.mod >= SRSRAN_MOD_64QAM) {
+        cfg->grant.tb.mod      = SRSRAN_MOD_16QAM;
+        cfg->grant.tb.nof_bits = cfg->grant.nof_re * srsran_mod_bits_x_symbol(SRSRAN_MOD_16QAM);
       }
     }
-    
+
+    if (cfg->grant.nof_re > q->max_re) {
+      ERROR("Error too many RE per subframe (%d). PUSCH configured for %d RE (%d PRB)",
+            cfg->grant.nof_re,
+            q->max_re,
+            q->cell.nof_prb);
+      return SRSRAN_ERROR_INVALID_INPUTS;
+    }
+
+    int err = srsran_pusch_assert_grant(&cfg->grant);
+    if (err != SRSRAN_SUCCESS) {
+      return err;
+    }
+
+    INFO("Encoding PUSCH SF: %d, Mod %s, RNTI: %d, TBS: %d, NofRE: %d, NofSymbols=%d, NofBitsE: %d, rv_idx: %d",
+         sf->tti % 10,
+         srsran_mod_string(cfg->grant.tb.mod),
+         cfg->rnti,
+         cfg->grant.tb.tbs,
+         cfg->grant.nof_re,
+         cfg->grant.nof_symb,
+         cfg->grant.tb.nof_bits,
+         cfg->grant.tb.rv);
+
+    bzero(q->q, cfg->grant.tb.nof_bits);
+    if ((ret = srsran_ulsch_encode(&q->ul_sch, cfg, data->ptr, &data->uci, q->g, q->q)) < 0) {
+      ERROR("Error encoding TB");
+      return SRSRAN_ERROR;
+    }
+
+    uint32_t nof_ri_ack_bits = (uint32_t)ret;
+
+    // Run scrambling
+    srsran_sequence_pusch_apply_pack((uint8_t*)q->q,
+                                     (uint8_t*)q->q,
+                                     cfg->rnti,
+                                     2 * (sf->tti % SRSRAN_NOF_SF_X_FRAME),
+                                     q->cell.id,
+                                     cfg->grant.tb.nof_bits);
+
+    // Correct UCI placeholder/repetition bits
+    uint8_t* d = q->q;
+    for (int i = 0; i < nof_ri_ack_bits; i++) {
+      if (q->ul_sch.ack_ri_bits[i].type == UCI_BIT_PLACEHOLDER) {
+        d[q->ul_sch.ack_ri_bits[i].position / 8] |= (1 << (7 - q->ul_sch.ack_ri_bits[i].position % 8));
+      } else if (q->ul_sch.ack_ri_bits[i].type == UCI_BIT_REPETITION) {
+        if (q->ul_sch.ack_ri_bits[i].position > 1) {
+          uint32_t p   = q->ul_sch.ack_ri_bits[i].position;
+          uint8_t  bit = d[(p - 1) / 8] & (1 << (7 - (p - 1) % 8));
+          if (bit) {
+            d[p / 8] |= 1 << (7 - p % 8);
+          } else {
+            d[p / 8] &= ~(1 << (7 - p % 8));
+          }
+        }
+      }
+    }
+
     // Bit mapping
-    srslte_mod_modulate_bytes(&q->mod[cfg->grant.mcs.mod], (uint8_t*) q->q, q->d, cfg->nbits.nof_bits);
+    srsran_mod_modulate_bytes(&q->mod[cfg->grant.tb.mod], (uint8_t*)q->q, q->d, cfg->grant.tb.nof_bits);
 
     // DFT precoding
-    srslte_dft_precoding(&q->dft_precoding, q->d, q->z, cfg->grant.L_prb, cfg->nbits.nof_symb);
-    
-    // Mapping to resource elements
-    pusch_put(q, &cfg->grant, q->z, sf_symbols);
-    
-    ret = SRSLTE_SUCCESS;
-  } 
-  return ret; 
-}
+    srsran_dft_precoding(&q->dft_precoding, q->d, q->z, cfg->grant.L_prb, cfg->grant.nof_symb);
 
+    // Mapping to resource elements
+    uint32_t n = pusch_put(q, &cfg->grant, q->z, sf_symbols, sf->shortened);
+    if (n != cfg->grant.nof_re) {
+      ERROR("Error trying to allocate %d symbols but %d were allocated (tti=%d, short=%d, L=%d)",
+            cfg->grant.nof_re,
+            n,
+            sf->tti,
+            sf->shortened,
+            cfg->grant.L_prb);
+      return SRSRAN_ERROR;
+    }
+
+    ret = SRSRAN_SUCCESS;
+  }
+  return ret;
+}
 
 /** Decodes the PUSCH from the received symbols
  */
-int srslte_pusch_decode(srslte_pusch_t *q, 
-                        srslte_pusch_cfg_t *cfg, srslte_softbuffer_rx_t *softbuffer, 
-                        cf_t *sf_symbols, 
-                        cf_t *ce, float noise_estimate, uint16_t rnti,                        
-                        uint8_t *data, srslte_cqi_value_t *cqi_value, srslte_uci_data_t *uci_data)
+int srsran_pusch_decode(srsran_pusch_t*        q,
+                        srsran_ul_sf_cfg_t*    sf,
+                        srsran_pusch_cfg_t*    cfg,
+                        srsran_chest_ul_res_t* channel,
+                        cf_t*                  sf_symbols,
+                        srsran_pusch_res_t*    out)
 {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS;
+  int      ret = SRSRAN_ERROR_INVALID_INPUTS;
   uint32_t n;
-  
-  if (q           != NULL &&
-      sf_symbols  != NULL &&
-      data        != NULL &&
-      cfg         != NULL)
-  {
-    
-    INFO("Decoding PUSCH SF: %d, Mod %s, NofBits: %d, NofRE: %d, NofSymbols=%d, NofBitsE: %d, rv_idx: %d\n",
-        cfg->sf_idx, srslte_mod_string(cfg->grant.mcs.mod), cfg->grant.mcs.tbs, 
-          cfg->nbits.nof_re, cfg->nbits.nof_symb, cfg->nbits.nof_bits, cfg->rv);
+
+  if (q != NULL && sf_symbols != NULL && out != NULL && cfg != NULL) {
+    struct timeval t[3];
+    if (cfg->meas_time_en) {
+      gettimeofday(&t[1], NULL);
+    }
+
+    /* Limit UL modulation if not supported by the UE or disabled by higher layers */
+    if (!cfg->enable_64qam) {
+      if (cfg->grant.tb.mod >= SRSRAN_MOD_64QAM) {
+        cfg->grant.tb.mod      = SRSRAN_MOD_16QAM;
+        cfg->grant.tb.nof_bits = cfg->grant.nof_re * srsran_mod_bits_x_symbol(SRSRAN_MOD_16QAM);
+      }
+    }
+
+    INFO("Decoding PUSCH SF: %d, Mod %s, NofBits: %d, NofRE: %d, NofSymbols=%d, NofBitsE: %d, rv_idx: %d",
+         sf->tti % 10,
+         srsran_mod_string(cfg->grant.tb.mod),
+         cfg->grant.tb.tbs,
+         cfg->grant.nof_re,
+         cfg->grant.nof_symb,
+         cfg->grant.tb.nof_bits,
+         cfg->grant.tb.rv);
 
     /* extract symbols */
-    n = pusch_get(q, &cfg->grant, sf_symbols, q->d);
-    if (n != cfg->nbits.nof_re) {
-      fprintf(stderr, "Error expecting %d symbols but got %d\n", cfg->nbits.nof_re, n);
-      return SRSLTE_ERROR;
+    n = pusch_get(q, &cfg->grant, sf_symbols, q->d, sf->shortened);
+    if (n != cfg->grant.nof_re) {
+      ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
+      return SRSRAN_ERROR;
     }
-    
+
+    // Measure Energy per Resource Element
+    if (cfg->meas_epre_en) {
+      out->epre_dbfs = srsran_convert_power_to_dB(srsran_vec_avg_power_cf(q->d, n));
+    } else {
+      out->epre_dbfs = NAN;
+    }
+
     /* extract channel estimates */
-    n = pusch_get(q, &cfg->grant, ce, q->ce);
-    if (n != cfg->nbits.nof_re) {
-      fprintf(stderr, "Error expecting %d symbols but got %d\n", cfg->nbits.nof_re, n);
-      return SRSLTE_ERROR;
+    n = pusch_get(q, &cfg->grant, channel->ce, q->ce, sf->shortened);
+    if (n != cfg->grant.nof_re) {
+      ERROR("Error expecting %d symbols but got %d", cfg->grant.nof_re, n);
+      return SRSRAN_ERROR;
     }
 
     // Equalization
-    srslte_predecoding_single(q->d, q->ce, q->z, cfg->nbits.nof_re, 1.0f, noise_estimate);
-    
+    srsran_predecoding_single(q->d, q->ce, q->z, NULL, cfg->grant.nof_re, 1.0f, channel->noise_estimate);
+
     // DFT predecoding
-    srslte_dft_precoding(&q->dft_precoding, q->z, q->d, cfg->grant.L_prb, cfg->nbits.nof_symb);
-    
+    srsran_dft_precoding(&q->dft_precoding, q->z, q->d, cfg->grant.L_prb, cfg->grant.nof_symb);
+
     // Soft demodulation
-    srslte_demod_soft_demodulate_s(cfg->grant.mcs.mod, q->d, q->q, cfg->nbits.nof_re);
+    if (q->llr_is_8bit) {
+      srsran_demod_soft_demodulate_b(cfg->grant.tb.mod, q->d, q->q, cfg->grant.nof_re);
+    } else {
+      srsran_demod_soft_demodulate_s(cfg->grant.tb.mod, q->d, q->q, cfg->grant.nof_re);
+    }
 
-    // Generate scrambling sequence if not pre-generated
-    srslte_sequence_t *seq = get_user_sequence(q, rnti, cfg->sf_idx, cfg->nbits.nof_bits);
-
-    // Set CQI len assuming RI = 1 (3GPP 36.212 Clause 5.2.4.1. Uplink control information on PUSCH without UL-SCH data)
-    if (cqi_value) {
-      if (cqi_value->type == SRSLTE_CQI_TYPE_SUBBAND_HL && cqi_value->subband_hl.ri_present) {
-        cqi_value->subband_hl.rank_is_not_one = false;
-        uci_data->uci_ri_len = (q->cell.nof_ports == 4) ? 2 : 1;
+    if (cfg->meas_evm_en && q->evm_buffer) {
+      if (q->llr_is_8bit) {
+        out->evm = srsran_evm_run_b(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d, q->q, cfg->grant.tb.nof_bits);
+      } else {
+        out->evm = srsran_evm_run_s(q->evm_buffer, &q->mod[cfg->grant.tb.mod], q->d, q->q, cfg->grant.tb.nof_bits);
       }
-      uci_data->uci_cqi_len = (uint32_t) srslte_cqi_size(cqi_value);
+    } else {
+      out->evm = NAN;
     }
 
-    // Decode RI/HARQ bits before descrambling
-    if (srslte_ulsch_uci_decode_ri_ack(&q->ul_sch, cfg, softbuffer, q->q, seq->c, uci_data)) {
-      fprintf(stderr, "Error decoding RI/HARQ bits\n");
-      return SRSLTE_ERROR; 
-    }
-
-    // Set CQI len with corresponding RI
-    if (cqi_value) {
-      if (cqi_value->type == SRSLTE_CQI_TYPE_SUBBAND_HL) {
-        cqi_value->subband_hl.rank_is_not_one = (uci_data->uci_ri != 0);
-      }
-      uci_data->uci_cqi_len = (uint32_t) srslte_cqi_size(cqi_value);
-    }
-    
     // Descrambling
-    srslte_scrambling_s_offset(seq, q->q, 0, cfg->nbits.nof_bits);
+    if (q->llr_is_8bit) {
+      srsran_sequence_pusch_apply_c(
+          q->q, q->q, cfg->rnti, 2 * (sf->tti % SRSRAN_NOF_SF_X_FRAME), q->cell.id, cfg->grant.tb.nof_bits);
+    } else {
+      srsran_sequence_pusch_apply_s(
+          q->q, q->q, cfg->rnti, 2 * (sf->tti % SRSRAN_NOF_SF_X_FRAME), q->cell.id, cfg->grant.tb.nof_bits);
+    }
+
+    // Generate packed sequence for UCI decoder
+    uint8_t* c = (uint8_t*)q->z; // Reuse Z
+    srsran_sequence_pusch_gen_unpack(
+        c, cfg->rnti, 2 * (sf->tti % SRSRAN_NOF_SF_X_FRAME), q->cell.id, cfg->grant.tb.nof_bits);
+
+    // Set max number of iterations
+    srsran_sch_set_max_noi(&q->ul_sch, cfg->max_nof_iterations);
 
     // Decode
-    ret = srslte_ulsch_uci_decode(&q->ul_sch, cfg, softbuffer, q->q, q->g, data, uci_data);
+    ret      = srsran_ulsch_decode(&q->ul_sch, cfg, q->q, q->g, c, out->data, &out->uci);
+    out->crc = (ret == 0);
 
-    // Unpack CQI value if available
-    if (cqi_value) {
-      srslte_cqi_value_unpack(uci_data->uci_cqi, cqi_value);
+    // Save number of iterations
+    out->avg_iterations_block = q->ul_sch.avg_iterations;
+
+    // Save O_cqi for power control
+    cfg->last_O_cqi = srsran_cqi_size(&cfg->uci_cfg.cqi);
+    ret             = SRSRAN_SUCCESS;
+
+    if (cfg->meas_time_en) {
+      gettimeofday(&t[2], NULL);
+      get_time_interval(t);
+      cfg->meas_time_value = t[0].tv_usec;
     }
   }
 
   return ret;
 }
 
-uint32_t srslte_pusch_last_noi(srslte_pusch_t *q) {
-  return q->ul_sch.nof_iterations;
+uint32_t srsran_pusch_grant_tx_info(srsran_pusch_grant_t* grant,
+                                    srsran_uci_cfg_t*     uci_cfg,
+                                    srsran_uci_value_t*   uci_data,
+                                    char*                 str,
+                                    uint32_t              str_len)
+{
+  uint32_t len = srsran_ra_ul_info(grant, str, str_len);
+
+  if (uci_data) {
+    len += srsran_uci_data_info(uci_cfg, uci_data, &str[len], str_len - len);
+  }
+
+  return len;
 }
 
+uint32_t srsran_pusch_tx_info(srsran_pusch_cfg_t* cfg, srsran_uci_value_t* uci_data, char* str, uint32_t str_len)
+{
+  uint32_t len = srsran_print_check(str, str_len, 0, "rnti=0x%x", cfg->rnti);
 
-  
+  len += srsran_pusch_grant_tx_info(&cfg->grant, &cfg->uci_cfg, uci_data, &str[len], str_len - len);
+
+  if (cfg->meas_time_en) {
+    len = srsran_print_check(str, str_len, len, ", t=%d us", cfg->meas_time_value);
+  }
+  return len;
+}
+
+uint32_t srsran_pusch_rx_info(srsran_pusch_cfg_t*    cfg,
+                              srsran_pusch_res_t*    res,
+                              srsran_chest_ul_res_t* chest_res,
+                              char*                  str,
+                              uint32_t               str_len)
+{
+  uint32_t len = srsran_print_check(str, str_len, 0, "rnti=0x%x", cfg->rnti);
+
+  len += srsran_ra_ul_info(&cfg->grant, &str[len], str_len);
+
+  len = srsran_print_check(
+      str, str_len, len, ", crc=%s, avg_iter=%.1f", res->crc ? "OK" : "KO", res->avg_iterations_block);
+
+  len += srsran_uci_data_info(&cfg->uci_cfg, &res->uci, &str[len], str_len - len);
+
+  len = srsran_print_check(str, str_len, len, ", snr=%.1f dB", chest_res->snr_db);
+
+  // Append Energy Per Resource Element
+  if (cfg->meas_epre_en) {
+    len = srsran_print_check(str, str_len, len, ", epre=%.1f dBfs", res->epre_dbfs);
+  }
+
+  // Append Time Aligment information if available
+  if (cfg->meas_ta_en) {
+    len = srsran_print_check(str, str_len, len, ", ta=%.1f us", chest_res->ta_us);
+  }
+
+  // Append CFO information if available
+  if (!isnan(chest_res->cfo_hz)) {
+    len = srsran_print_check(str, str_len, len, ", cfo=%.1f hz", chest_res->cfo_hz);
+  }
+
+  // Append EVM measurement if available
+  if (cfg->meas_evm_en) {
+    len = srsran_print_check(str, str_len, len, ", evm=%.1f %%", res->evm * 100);
+  }
+
+  if (cfg->meas_time_en) {
+    len = srsran_print_check(str, str_len, len, ", t=%d us", cfg->meas_time_value);
+  }
+  return len;
+}

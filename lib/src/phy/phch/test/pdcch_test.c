@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -28,331 +23,413 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <srslte/phy/common/phy_common.h>
-#include <srslte/phy/phch/ra.h>
-#include <srslte/phy/phch/dci.h>
-#include <srslte/phy/phch/pdcch.h>
 
-#include "srslte/srslte.h"
+#include "srsran/common/test_common.h"
+#include "srsran/srsran.h"
 
-srslte_cell_t cell = {
-  .nof_prb = 6,
-  .nof_ports = 1,
-  .id = 1,
-  .cp = SRSLTE_CP_NORM,
-  .phich_resources = SRSLTE_PHICH_R_1,
-  .phich_length = SRSLTE_PHICH_NORM
-};
+// Test parameters
+static uint32_t         pci         = 1;
+static uint16_t         rnti        = 0x46;
+static uint32_t         cfi         = 2;
+static uint32_t         nof_ports   = 1;
+static srsran_dci_cfg_t dci_cfg     = {};
+static uint32_t         nof_prb     = 100;
+static float            snr_dB      = NAN;
+static uint32_t         repetitions = 1;
+static bool             false_check = false;
 
-uint32_t cfi = 1;
-uint32_t nof_rx_ant = 1;
-bool print_dci_table;
+// Test objects
+static srsran_random_t       random_gen                     = NULL;
+static srsran_pdcch_t        pdcch_tx                       = {};
+static srsran_pdcch_t        pdcch_rx                       = {};
+static srsran_chest_dl_res_t chest_dl_res                   = {};
+static srsran_channel_awgn_t awgn                           = {};
+static cf_t*                 slot_symbols[SRSRAN_MAX_PORTS] = {};
 
-void usage(char *prog) {
-  printf("Usage: %s [cfpndv]\n", prog);
-  printf("\t-c cell id [Default %d]\n", cell.id);
+static void usage(char* prog)
+{
+  printf("Usage: %s [pfncxv]\n", prog);
+  printf("\t-c cell id [Default %d]\n", pci);
   printf("\t-f cfi [Default %d]\n", cfi);
-  printf("\t-p cell.nof_ports [Default %d]\n", cell.nof_ports);
-  printf("\t-n cell.nof_prb [Default %d]\n", cell.nof_prb);
-  printf("\t-A nof_rx_ant [Default %d]\n", nof_rx_ant);
-  printf("\t-d Print DCI table [Default %s]\n", print_dci_table?"yes":"no");
-  printf("\t-v [set srslte_verbose to debug, default none]\n");
+  printf("\t-p cell.nof_ports [Default %d]\n", nof_ports);
+  printf("\t-n cell.nof_prb [Default %d]\n", nof_prb);
+  printf("\t-x Enable/Disable Cross-scheduling [Default %s]\n", dci_cfg.cif_enabled ? "enabled" : "disabled");
+  printf("\t-F False detection check [Default %s]\n", false_check ? "enabled" : "disabled");
+  printf("\t-R Repetitions [Default %d]\n", repetitions);
+  printf("\t-S SNR in dB [Default %+.1f]\n", snr_dB);
+  printf("\t-v [set srsran_verbose to debug, default none]\n");
 }
 
-void parse_args(int argc, char **argv) {
+static void parse_args(int argc, char** argv)
+{
   int opt;
-  while ((opt = getopt(argc, argv, "cfpndvA")) != -1) {
+  while ((opt = getopt(argc, argv, "pfncxvFRS")) != -1) {
     switch (opt) {
-    case 'p':
-      cell.nof_ports = (uint32_t) atoi(argv[optind]);
-      break;
-    case 'f':
-      cfi = (uint32_t) atoi(argv[optind]);
-      break;
-    case 'n':
-      cell.nof_prb = (uint32_t) atoi(argv[optind]);
-      break;
-    case 'c':
-      cell.id = (uint32_t) atoi(argv[optind]);
-      break;
-    case 'A':
-      nof_rx_ant = (uint32_t) atoi(argv[optind]);
-      break;
-    case 'd':
-      print_dci_table = true;
-      break;
-    case 'v':
-      srslte_verbose++;
-      break;
-    default:
-      usage(argv[0]);
-      exit(-1);
+      case 'p':
+        nof_ports = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'f':
+        cfi = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'n':
+        nof_prb = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'c':
+        pci = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'x':
+        dci_cfg.cif_enabled = !dci_cfg.cif_enabled;
+        break;
+      case 'F':
+        false_check = !false_check;
+        break;
+      case 'R':
+        repetitions = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'S':
+        snr_dB = (float)strtof(argv[optind], NULL);
+        break;
+      case 'v':
+        increase_srsran_verbose_level();
+        break;
+      default:
+        usage(argv[0]);
+        exit(-1);
     }
   }
+  printf("params - pci=%d; rnti=0x%04x; cfi=%d; nof_ports=%d; cif_enabled=%d; nof_prb=%d; snr_db=%+.1f; "
+         "repetitions=%d; false_check=%d;\n",
+         pci,
+         rnti,
+         cfi,
+         nof_ports,
+         dci_cfg.cif_enabled,
+         nof_prb,
+         snr_dB,
+         repetitions,
+         false_check);
 }
 
-int test_dci_payload_size() {
-  int i, j;
-  int x[5];
-  const srslte_dci_format_t formats[] = { SRSLTE_DCI_FORMAT0, SRSLTE_DCI_FORMAT1, SRSLTE_DCI_FORMAT1A, SRSLTE_DCI_FORMAT1C, SRSLTE_DCI_FORMAT2A };
-  const int prb[6] = { 6, 15, 25, 50, 75, 100 };
-  const int dci_sz[6][5] = { { 21, 19, 21, 8, 28 }, { 22, 23, 22, 10 , 31}, { 25, 27,
-      25, 12 , 36}, { 27, 31, 27, 13 , 41}, { 27, 33, 27, 14 , 42}, { 28, 39, 28, 15, 48 }};
+static void print_dci_msg(const char* desc, const srsran_dci_msg_t* dci_msg)
+{
+  printf("%srnti=0x%04x; format=%s; L=%d; ncce=%d; payload=",
+         desc,
+         rnti,
+         srsran_dci_format_string(dci_msg->format),
+         dci_msg->location.L,
+         dci_msg->location.ncce);
+  srsran_vec_fprint_byte(stdout, dci_msg->payload, dci_msg->nof_bits);
+}
 
+static int assert_payload_size(const srsran_cell_t* cell, srsran_dl_sf_cfg_t* dl_sf)
+{
+  const srsran_dci_format_t formats[] = {
+      SRSRAN_DCI_FORMAT0, SRSRAN_DCI_FORMAT1, SRSRAN_DCI_FORMAT1A, SRSRAN_DCI_FORMAT1C, SRSRAN_DCI_FORMAT2A};
+  const int prb[6]       = {6, 15, 25, 50, 75, 100};
+  const int dci_sz[6][5] = {{21, 19, 21, 8, 28},
+                            {22, 23, 22, 10, 31},
+                            {25, 27, 25, 12, 36},
+                            {27, 31, 27, 13, 41},
+                            {27, 33, 27, 14, 42},
+                            {28, 39, 28, 15, 48}};
 
-  printf("Testing DCI payload sizes...\n");
-  printf("  PRB\t0\t1\t1A\t1C\t2A\n");
-  for (i = 0; i < 6; i++) {
+  // Skip if special options are requested
+  if (dci_cfg.cif_enabled || dci_cfg.multiple_csi_request_enabled) {
+    return SRSRAN_SUCCESS;
+  }
+
+  // Skip if MIMO is enabled
+  if (cell->nof_ports > 1) {
+    return SRSRAN_SUCCESS;
+  }
+
+  for (uint32_t i = 0; i < 6; i++) {
+    if (prb[i] != cell->nof_prb) {
+      continue;
+    }
     int n = prb[i];
-    for (j = 0; j < 5; j++) {
-      x[j] = srslte_dci_format_sizeof(formats[j], (uint32_t) n, 1);
+
+    uint32_t x[5];
+    for (uint32_t j = 0; j < 5; j++) {
+      x[j] = srsran_dci_format_sizeof(cell, dl_sf, &dci_cfg, formats[j]);
       if (x[j] != dci_sz[i][j]) {
-        fprintf(stderr, "Invalid DCI payload size for %s\n",
-            srslte_dci_format_string(formats[j]));
-        return -1;
+        ERROR("Invalid DCI payload size for %s and %d PRB. Is %d and should be %d",
+              srsran_dci_format_string(formats[j]),
+              n,
+              x[j],
+              dci_sz[i][j]);
+        return SRSRAN_ERROR;
       }
     }
-    printf("  %2d:\t%2d\t%2d\t%2d\t%2d\t%2d\n", n, x[0], x[1], x[2], x[3], x[4]);
+    return SRSRAN_SUCCESS;
   }
-  printf("Ok\n");
-  
-  if (print_dci_table) {
-    printf("dci_sz_table[101][4] = {\n");
-    for (i=0;i<=100;i++) {
-      printf("  {");
-      for (j=0;j<4;j++) {
-        printf("%d",srslte_dci_format_sizeof(formats[j], (uint32_t) i, 1));
-        if (j<3) {
-          printf(", ");
-        }
-      }
-      if (i<100) {
-        printf("},\n");
-      } else {
-        printf("}\n");
-      }
-    }
-    printf("};\n");
-  }
+
   return 0;
 }
 
-typedef struct {
-  srslte_dci_msg_t dci_tx, dci_rx;
-  srslte_dci_location_t dci_location;
-  srslte_dci_format_t dci_format;
-  srslte_ra_dl_dci_t ra_dl_tx;
-  srslte_ra_dl_dci_t ra_dl_rx;
-} testcase_dci_t;
+static const srsran_dci_format_t formats[] = {SRSRAN_DCI_FORMAT0,
+                                              SRSRAN_DCI_FORMAT1A,
+                                              SRSRAN_DCI_FORMAT1,
+                                              SRSRAN_DCI_FORMAT2A,
+                                              SRSRAN_DCI_FORMAT2,
+                                              SRSRAN_DCI_NOF_FORMATS};
 
-int main(int argc, char **argv) {
-  srslte_pdcch_t pdcch_tx, pdcch_rx;
-  testcase_dci_t testcases[10] = {};
-  srslte_ra_dl_dci_t ra_dl;
-  srslte_regs_t regs;
-  int i, j, k;
-  cf_t *ce[SRSLTE_MAX_PORTS][SRSLTE_MAX_PORTS];
-  int nof_re;
-  cf_t *tx_slot_symbols[SRSLTE_MAX_PORTS], *rx_slot_symbols[SRSLTE_MAX_PORTS];
-  int nof_dcis;
+static float get_snr_dB(uint32_t L)
+{
+  static const float snr_table_dB[4] = {15.0f, 6.0f, 5.0f, 0.0f};
 
-  bzero(&testcases, sizeof(testcase_dci_t)*10);
+  if (isnormal(snr_dB) && L < 4) {
+    return snr_dB;
+  } else if (L < 4) {
+    return snr_table_dB[L];
+  } else {
+    ERROR("L >= 4\n");
+    return 0.0f;
+  }
+}
 
-  int ret = -1;
+static int test_case1()
+{
+  uint32_t nof_re = SRSRAN_NOF_RE(pdcch_tx.cell);
+
+  // Iterate all possible subframes
+  for (uint32_t f_idx = 0; formats[f_idx] != SRSRAN_DCI_NOF_FORMATS; f_idx++) {
+    srsran_dci_format_t format                 = formats[f_idx];
+    struct timeval      t[3]                   = {};
+    uint64_t            t_encode_us            = 0;
+    uint64_t            t_encode_count         = 0;
+    uint64_t            t_llr_us               = 0;
+    uint64_t            t_decode_us            = 0;
+    uint64_t            t_decode_count         = 0;
+    uint32_t            false_alarm_corr_count = 0;
+    float               min_corr               = INFINITY;
+
+    for (uint32_t sf_idx = 0; sf_idx < repetitions * SRSRAN_NOF_SF_X_FRAME; sf_idx++) {
+      srsran_dl_sf_cfg_t dl_sf_cfg = {};
+      dl_sf_cfg.cfi                = cfi;
+      dl_sf_cfg.tti                = sf_idx % 10240;
+
+      // Generate PDCCH locations
+      srsran_dci_location_t locations[SRSRAN_MAX_CANDIDATES] = {};
+      uint32_t              locations_count                  = 0;
+      locations_count +=
+          srsran_pdcch_common_locations(&pdcch_tx, &locations[locations_count], SRSRAN_MAX_CANDIDATES_COM, cfi);
+      locations_count +=
+          srsran_pdcch_ue_locations(&pdcch_tx, &dl_sf_cfg, &locations[locations_count], SRSRAN_MAX_CANDIDATES_UE, rnti);
+
+      // Iterate all possible locations
+      for (uint32_t loc = 0; loc < locations_count; loc++) {
+        srsran_dci_msg_t dci_tx = {};
+        dci_tx.nof_bits         = srsran_dci_format_sizeof(&pdcch_tx.cell, &dl_sf_cfg, &dci_cfg, format);
+        dci_tx.location         = locations[loc];
+        dci_tx.format           = format;
+        dci_tx.rnti             = rnti;
+
+        // Assert DCI size
+        TESTASSERT(assert_payload_size(&pdcch_tx.cell, &dl_sf_cfg) == SRSRAN_SUCCESS);
+
+        // Initialise resource grid for each Tx port
+        for (uint32_t p = 0; p < nof_ports; p++) {
+          srsran_vec_cf_zero(slot_symbols[p], nof_re);
+        }
+
+        // Generate Tx DCI
+        srsran_random_bit_vector(random_gen, dci_tx.payload, dci_tx.nof_bits);
+
+        // Encode
+        gettimeofday(&t[1], NULL);
+        TESTASSERT(srsran_pdcch_encode(&pdcch_tx, &dl_sf_cfg, &dci_tx, slot_symbols) == SRSRAN_SUCCESS);
+        gettimeofday(&t[2], NULL);
+        get_time_interval(t);
+        t_encode_us += (size_t)(t[0].tv_sec * 1e6 + t[0].tv_usec);
+        t_encode_count++;
+
+        // Set noise level according to aggregation level
+        float n0_dB = -get_snr_dB(locations[loc].L);
+        TESTASSERT(srsran_channel_awgn_set_n0(&awgn, n0_dB) == SRSRAN_SUCCESS);
+        chest_dl_res.noise_estimate = srsran_convert_dB_to_power(n0_dB);
+
+        // Apply AWGN
+        for (uint32_t p = 0; p < nof_ports; p++) {
+          srsran_channel_awgn_run_c(&awgn, slot_symbols[p], slot_symbols[p], nof_re);
+        }
+
+        // Extract LLR
+        gettimeofday(&t[1], NULL);
+        TESTASSERT(srsran_pdcch_extract_llr(&pdcch_rx, &dl_sf_cfg, &chest_dl_res, slot_symbols) == SRSRAN_SUCCESS);
+        gettimeofday(&t[2], NULL);
+        get_time_interval(t);
+        t_llr_us += (size_t)(t[0].tv_sec * 1e6 + t[0].tv_usec);
+
+        // Try decoding the PDCCH in all possible locations
+        for (uint32_t loc_rx = 0; loc_rx < locations_count; loc_rx++) {
+          // Skip location if:
+          // - False check is disabled and Tx/Rx dont match
+          // - Tx aggregation level is bigger than Rx aggregation level
+          if ((!false_check && loc_rx != loc) || locations[loc_rx].L < locations[loc].L) {
+            continue;
+          }
+
+          // Prepare DCI message context
+          srsran_dci_msg_t dci_rx = {};
+          dci_rx.location         = locations[loc_rx];
+          dci_rx.format           = format;
+
+          // Try to decode PDCCH message
+          gettimeofday(&t[1], NULL);
+          TESTASSERT(srsran_pdcch_decode_msg(&pdcch_rx, &dl_sf_cfg, &dci_cfg, &dci_rx) == SRSRAN_SUCCESS);
+          gettimeofday(&t[2], NULL);
+          get_time_interval(t);
+          t_decode_us += (size_t)(t[0].tv_sec * 1e6 + t[0].tv_usec);
+          t_decode_count++;
+
+          // Compute LLR correlation
+          float corr = srsran_pdcch_msg_corr(&pdcch_rx, &dci_rx);
+
+          bool rnti_match     = (dci_tx.rnti == dci_rx.rnti);
+          bool location_match = (loc == loc_rx);
+          bool payload_match  = (memcmp(dci_tx.payload, dci_rx.payload, dci_tx.nof_bits) == 0);
+          bool corr_thr       = corr > 0.5f;
+
+          // Skip location if the decoding is not successful in a different location than transmitted
+          if (!location_match && !rnti_match) {
+            continue;
+          }
+
+          // Skip location if the correlation does not surpass the threshold
+          if (!location_match && !corr_thr) {
+            false_alarm_corr_count++;
+            continue;
+          }
+
+          // Assert correlation only if location matches
+          if (location_match) {
+            TESTASSERT(corr_thr);
+            if (location_match && corr < min_corr) {
+              min_corr = corr;
+            }
+          }
+
+          if (get_srsran_verbose_level() >= SRSRAN_VERBOSE_INFO || !payload_match) {
+            // If payload is not match and there is no logging, set logging to info and run the decoder again
+            if (get_srsran_verbose_level() < SRSRAN_VERBOSE_INFO) {
+              printf("-- Detected payload was not matched, repeating decode with INFO logs (n0: %+.1f dB, corr: %f)\n",
+                     n0_dB,
+                     corr);
+              set_srsran_verbose_level(SRSRAN_VERBOSE_INFO);
+              srsran_pdcch_decode_msg(&pdcch_rx, &dl_sf_cfg, &dci_cfg, &dci_rx);
+            }
+            print_dci_msg("Tx: ", &dci_tx);
+            print_dci_msg("Rx: ", &dci_rx);
+          }
+
+          // Assert received message
+          TESTASSERT(payload_match);
+        }
+      }
+    }
+
+    if (!t_encode_count || !t_decode_count) {
+      ERROR("Error in test case 1: undefined division");
+      return SRSRAN_ERROR;
+    }
+
+    printf("test_case_1 - format %s - passed - %.1f usec/encode; %.1f usec/llr; %.1f usec/decode; min_corr=%f; "
+           "false_alarm_prob=%f;\n",
+           srsran_dci_format_string(format),
+           (double)t_encode_us / (double)(t_encode_count),
+           (double)t_llr_us / (double)(t_encode_count),
+           (double)t_decode_us / (double)(t_decode_count),
+           min_corr,
+           (double)false_alarm_corr_count / (double)t_decode_count);
+  }
+
+  return SRSRAN_SUCCESS;
+}
+
+int main(int argc, char** argv)
+{
+  srsran_regs_t regs = {};
+  int           i    = 0;
+  int           ret  = SRSRAN_ERROR;
 
   parse_args(argc, argv);
+  random_gen = srsran_random_init(0x1234);
 
-  nof_re = SRSLTE_CP_NORM_NSYMB * cell.nof_prb * SRSLTE_NRE;
+  // Create cell
+  srsran_cell_t cell   = {};
+  cell.nof_prb         = nof_prb;
+  cell.nof_ports       = nof_ports;
+  cell.cp              = SRSRAN_CP_NORM;
+  cell.phich_resources = SRSRAN_PHICH_R_1;
+  cell.phich_length    = SRSRAN_PHICH_NORM;
 
-  if (test_dci_payload_size()) {
-    exit(-1);
+  // Initialise channel estimates with identity matrix
+  if (srsran_chest_dl_res_init(&chest_dl_res, cell.nof_prb) < SRSRAN_SUCCESS) {
+    ERROR("Error channel estimates");
+    goto quit;
   }
+  srsran_chest_dl_res_set_identity(&chest_dl_res);
 
-  /* init memory */
-  for (i = 0; i < SRSLTE_MAX_PORTS; i++) {
-    for (j = 0; j < SRSLTE_MAX_PORTS; j++) {
-      ce[i][j] = malloc(sizeof(cf_t) * nof_re);
-      if (!ce[i][j]) {
-        perror("malloc");
-        exit(-1);
-      }
-      for (k = 0; k < nof_re; k++) {
-        //ce[i][j][k] = (i == j) ? 1 : 0;
-        ce[i][j][k] = ((float)rand()/(float)RAND_MAX) + _Complex_I*((float)rand()/(float)RAND_MAX);
-      }
-    }
-    tx_slot_symbols[i] = malloc(sizeof(cf_t) * nof_re);
-    if (!tx_slot_symbols[i]) {
-      perror("malloc");
-      exit(-1);
-    }
-    bzero(tx_slot_symbols[i], sizeof(cf_t) * nof_re);
-
-    rx_slot_symbols[i] = malloc(sizeof(cf_t) * nof_re);
-    if (!rx_slot_symbols[i]) {
-      perror("malloc");
-      exit(-1);
-    }
-    bzero(rx_slot_symbols[i], sizeof(cf_t) * nof_re);
-  }
-
-  if (srslte_regs_init(&regs, cell)) {
-    fprintf(stderr, "Error initiating regs\n");
-    exit(-1);
-  }
-
-  if (srslte_pdcch_init_enb(&pdcch_tx, cell.nof_prb)) {
-    fprintf(stderr, "Error creating PDCCH object\n");
-    exit(-1);
-  }
-  if (srslte_pdcch_set_cell(&pdcch_tx, &regs, cell)) {
-    fprintf(stderr, "Error setting cell in PDCCH object\n");
-    exit(-1);
-  }
-
-  if (srslte_pdcch_init_ue(&pdcch_rx, cell.nof_prb, nof_rx_ant)) {
-    fprintf(stderr, "Error creating PDCCH object\n");
-    exit(-1);
-  }
-  if (srslte_pdcch_set_cell(&pdcch_rx, &regs, cell)) {
-    fprintf(stderr, "Error setting cell in PDCCH object\n");
-    exit(-1);
-  }
-
-  /* Resource allocate init */
-  nof_dcis = 0;
-  bzero(&ra_dl, sizeof(srslte_ra_dl_dci_t));
-  ra_dl.harq_process = 0;
-  ra_dl.mcs_idx = 5;
-  ra_dl.ndi = 0;
-  ra_dl.rv_idx = 0;
-  ra_dl.alloc_type = SRSLTE_RA_ALLOC_TYPE0;
-  ra_dl.type0_alloc.rbg_bitmask = 0x5;
-  ra_dl.tb_en[0] = true;
-
-  /* Format 1 Test case */
-  testcases[nof_dcis].dci_format = SRSLTE_DCI_FORMAT1;
-  testcases[nof_dcis].ra_dl_tx = ra_dl;
-  nof_dcis++;
-
-  /* Format 1 Test case */
-  ra_dl.mcs_idx = 15;
-  testcases[nof_dcis].dci_format = SRSLTE_DCI_FORMAT1;
-  testcases[nof_dcis].ra_dl_tx = ra_dl;
-  nof_dcis++;
-
-  /* Tx Diversity Test case */
-  if (cell.nof_ports > 1) {
-    ra_dl.mcs_idx_1 = 0;
-    ra_dl.rv_idx_1 = 0;
-    ra_dl.ndi_1 = false;
-    ra_dl.tb_en[1] = false;
-    testcases[nof_dcis].dci_format = SRSLTE_DCI_FORMAT2A;
-    testcases[nof_dcis].ra_dl_tx = ra_dl;
-    nof_dcis++;
-  }
-
-  /* CDD Spatial Multiplexing Test case */
-  if (cell.nof_ports > 1) {
-    ra_dl.mcs_idx_1 = 28;
-    ra_dl.rv_idx_1 = 1;
-    ra_dl.ndi_1 = false;
-    ra_dl.tb_en[1] = true;
-    testcases[nof_dcis].dci_format = SRSLTE_DCI_FORMAT2A;
-    testcases[nof_dcis].ra_dl_tx = ra_dl;
-    nof_dcis++;
-  }
-
-  /* Execute Rx */
-  for (i=0;i<nof_dcis;i++) {
-    srslte_dci_msg_pack_pdsch(&testcases[i].ra_dl_tx, testcases[i].dci_format, &testcases[i].dci_tx,
-                              cell.nof_prb, cell.nof_ports, false);
-    srslte_dci_location_set(&testcases[i].dci_location, 0, (uint32_t) i);
-
-    if (srslte_pdcch_encode(&pdcch_tx, &testcases[i].dci_tx, testcases[i].dci_location, (uint16_t) (1234 + i),
-                            tx_slot_symbols, 0, cfi)) {
-      fprintf(stderr, "Error encoding DCI message\n");
+  // Allocate grid
+  uint32_t nof_re = SRSRAN_NOF_RE(cell);
+  for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+    slot_symbols[i] = srsran_vec_cf_malloc(nof_re);
+    if (slot_symbols[i] == NULL) {
+      ERROR("malloc");
       goto quit;
     }
   }
 
-  /* Apply channel */
-  for (j = 0; j < nof_rx_ant; j++) {
-    for (k = 0; k < nof_re; k++) {
-      for (i = 0; i < cell.nof_ports; i++) {
-        rx_slot_symbols[j][k] += tx_slot_symbols[i][k]*ce[i][j][k];
-      }
-    }
-  }
-
-  /* Execute 'Rx' */
-  if (srslte_pdcch_extract_llr_multi(&pdcch_rx, rx_slot_symbols, ce, 0, 0, cfi)) {
-    fprintf(stderr, "Error extracting LLRs\n");
+  if (srsran_regs_init(&regs, cell)) {
+    ERROR("Error initiating regs");
     goto quit;
   }
 
-  /* Decode DCIs */
-  for (i=0;i<nof_dcis;i++) {
-    uint16_t crc_rem;
-    if (srslte_pdcch_decode_msg(&pdcch_rx, &testcases[i].dci_rx, &testcases[i].dci_location, testcases[i].dci_format, cfi, &crc_rem)) {
-      fprintf(stderr, "Error decoding DCI message\n");
-      goto quit;
-    }
-    if (srslte_dci_msg_unpack_pdsch(&testcases[i].dci_rx, &testcases[i].ra_dl_rx, cell.nof_prb, cell.nof_ports, false)) {
-      fprintf(stderr, "Error unpacking DCI message\n");
-      goto quit;
-    }
-    if (crc_rem >= 1234 && crc_rem < 1234 + nof_dcis) {
-      crc_rem -= 1234;
-    } else {
-      printf("Received invalid DCI CRC 0x%x\n", crc_rem);
-      goto quit;
-    }
+  if (srsran_pdcch_init_enb(&pdcch_tx, cell.nof_prb)) {
+    ERROR("Error creating PDCCH object");
+    goto quit;
+  }
+  if (srsran_pdcch_set_cell(&pdcch_tx, &regs, cell)) {
+    ERROR("Error setting cell in PDCCH object");
+    goto quit;
   }
 
-  /* Compare Tx and Rx */
-  for (i = 0; i < nof_dcis; i++) {
-    if (memcmp(testcases[i].dci_tx.data, testcases[i].dci_rx.data, testcases[i].dci_tx.nof_bits)) {
-      printf("Error in DCI %d: Received data does not match\n", i);
-      goto quit;
-    }
-    if (memcmp(&testcases[i].ra_dl_tx, &testcases[i].ra_dl_rx, sizeof(srslte_ra_dl_dci_t))) {
-      printf("Error in RA %d: Received data does not match\n", i);
-      printf("     Field    |    Tx    |    Rx    \n");
-      printf("--------------+----------+----------\n");
-      printf(" harq_process | %8d | %8d\n", testcases[i].ra_dl_tx.harq_process, testcases[i].ra_dl_rx.harq_process);
-      printf("      mcs_idx | %8d | %8d\n", testcases[i].ra_dl_tx.mcs_idx, testcases[i].ra_dl_rx.mcs_idx);
-      printf("       rv_idx | %8d | %8d\n", testcases[i].ra_dl_tx.rv_idx, testcases[i].ra_dl_rx.rv_idx);
-      printf("          ndi | %8d | %8d\n", testcases[i].ra_dl_tx.ndi, testcases[i].ra_dl_rx.ndi);
-      printf("    mcs_idx_1 | %8d | %8d\n", testcases[i].ra_dl_tx.mcs_idx_1, testcases[i].ra_dl_rx.mcs_idx_1);
-      printf("     rv_idx_1 | %8d | %8d\n", testcases[i].ra_dl_tx.rv_idx_1, testcases[i].ra_dl_rx.rv_idx_1);
-      printf("        ndi_1 | %8d | %8d\n", testcases[i].ra_dl_tx.ndi_1, testcases[i].ra_dl_rx.ndi_1);
-      printf("   tb_cw_swap | %8d | %8d\n", testcases[i].ra_dl_tx.tb_cw_swap, testcases[i].ra_dl_rx.tb_cw_swap);
-      printf("      sram_id | %8d | %8d\n", testcases[i].ra_dl_tx.sram_id, testcases[i].ra_dl_rx.sram_id);
-      printf("        pinfo | %8d | %8d\n", testcases[i].ra_dl_tx.pinfo, testcases[i].ra_dl_rx.pinfo);
-      printf("        pconf | %8d | %8d\n", testcases[i].ra_dl_tx.pconf, testcases[i].ra_dl_rx.pconf);
-      printf(" power_offset | %8d | %8d\n", testcases[i].ra_dl_tx.power_offset, testcases[i].ra_dl_rx.power_offset);
-      printf("    tpc_pucch | %8d | %8d\n", testcases[i].ra_dl_tx.tpc_pucch, testcases[i].ra_dl_rx.tpc_pucch);
-      printf("     tb_en[0] | %8d | %8d\n", testcases[i].ra_dl_tx.tb_en[0], testcases[i].ra_dl_rx.tb_en[0]);
-      printf("     tb_en[1] | %8d | %8d\n", testcases[i].ra_dl_tx.tb_en[1], testcases[i].ra_dl_rx.tb_en[1]);
-      printf("    dci_is_1a | %8d | %8d\n", testcases[i].ra_dl_tx.dci_is_1a, testcases[i].ra_dl_rx.dci_is_1a);
-      printf("    dci_is_1c | %8d | %8d\n", testcases[i].ra_dl_tx.dci_is_1c, testcases[i].ra_dl_rx.dci_is_1c);
-      goto quit;
-    }
+  if (srsran_pdcch_init_ue(&pdcch_rx, cell.nof_prb, nof_ports)) {
+    ERROR("Error creating PDCCH object");
+    goto quit;
   }
-  ret = 0;
 
-quit: 
-  srslte_pdcch_free(&pdcch_tx);
-  srslte_pdcch_free(&pdcch_rx);
-  srslte_regs_free(&regs);
+  if (srsran_pdcch_set_cell(&pdcch_rx, &regs, cell)) {
+    ERROR("Error setting cell in PDCCH object");
+    goto quit;
+  }
 
-  for (i = 0; i < SRSLTE_MAX_PORTS; i++) {
-    for (j = 0; j < SRSLTE_MAX_PORTS; j++) {
-      free(ce[i][j]);
+  if (srsran_channel_awgn_init(&awgn, 0x1234) < SRSRAN_SUCCESS) {
+    ERROR("Error init AWGN");
+    goto quit;
+  }
+
+  // Execute actual test cases
+  if (test_case1() < SRSRAN_SUCCESS) {
+    ERROR("Test case 1 failed");
+    goto quit;
+  }
+
+  ret = SRSRAN_SUCCESS;
+
+quit:
+  srsran_pdcch_free(&pdcch_tx);
+  srsran_pdcch_free(&pdcch_rx);
+  srsran_chest_dl_res_free(&chest_dl_res);
+  srsran_regs_free(&regs);
+  srsran_random_free(random_gen);
+  srsran_channel_awgn_free(&awgn);
+
+  for (i = 0; i < SRSRAN_MAX_PORTS; i++) {
+    if (slot_symbols[i]) {
+      free(slot_symbols[i]);
     }
-    free(tx_slot_symbols[i]);
-    free(rx_slot_symbols[i]);
   }
   if (ret) {
     printf("Error\n");

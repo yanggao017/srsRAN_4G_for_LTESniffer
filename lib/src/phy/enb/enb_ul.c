@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,392 +19,265 @@
  *
  */
 
-#include "srslte/phy/enb/enb_ul.h"
+#include "srsran/phy/enb/enb_ul.h"
 
+#include "srsran/srsran.h"
 #include <complex.h>
 #include <math.h>
 #include <string.h>
 
-
-#define CURRENT_FFTSIZE   srslte_symbol_sz(q->cell.nof_prb)
-#define CURRENT_SFLEN     SRSLTE_SF_LEN(CURRENT_FFTSIZE)
-
-#define CURRENT_SLOTLEN_RE SRSLTE_SLOT_LEN_RE(q->cell.nof_prb, q->cell.cp)
-#define CURRENT_SFLEN_RE SRSLTE_SF_LEN_RE(q->cell.nof_prb, q->cell.cp)
-
-#define MAX_CANDIDATES  16
-
-int srslte_enb_ul_init(srslte_enb_ul_t *q,
-                       cf_t *in_buffer,
-                       uint32_t max_prb)
+int srsran_enb_ul_init(srsran_enb_ul_t* q, cf_t* in_buffer, uint32_t max_prb)
 {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS; 
-  
-  if (q != NULL)
-  {
-    ret = SRSLTE_ERROR;
-    
-    bzero(q, sizeof(srslte_enb_ul_t));
-    
-    q->users = calloc(sizeof(srslte_enb_ul_user_t*), (1+SRSLTE_SIRNTI));
-    if (!q->users) {
-      perror("malloc");
-      goto clean_exit;
-    }
+  int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-    q->sf_symbols = srslte_vec_malloc(SRSLTE_SF_LEN_RE(max_prb, SRSLTE_CP_NORM) * sizeof(cf_t));
+  if (q != NULL) {
+    ret = SRSRAN_ERROR;
+
+    bzero(q, sizeof(srsran_enb_ul_t));
+
+    q->sf_symbols = srsran_vec_cf_malloc(SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
     if (!q->sf_symbols) {
       perror("malloc");
       goto clean_exit;
     }
 
-    q->ce = srslte_vec_malloc(SRSLTE_SF_LEN_RE(max_prb, SRSLTE_CP_NORM) * sizeof(cf_t));
-    if (!q->ce) {
+    q->chest_res.ce = srsran_vec_cf_malloc(SRSRAN_SF_LEN_RE(max_prb, SRSRAN_CP_NORM));
+    if (!q->chest_res.ce) {
       perror("malloc");
       goto clean_exit;
     }
+    q->in_buffer = in_buffer;
 
-    if (srslte_ofdm_rx_init(&q->fft, SRSLTE_CP_NORM, in_buffer, q->sf_symbols, max_prb)) {
-      fprintf(stderr, "Error initiating FFT\n");
-      goto clean_exit;
-    }
-    srslte_ofdm_set_normalize(&q->fft, false);
-    srslte_ofdm_set_freq_shift(&q->fft, -0.5);
-
-    if (srslte_pucch_init(&q->pucch)) {
-      fprintf(stderr, "Error creating PUCCH object\n");
+    if (srsran_pucch_init_enb(&q->pucch)) {
+      ERROR("Error creating PUCCH object");
       goto clean_exit;
     }
 
-    if (srslte_pusch_init_enb(&q->pusch, max_prb)) {
-      fprintf(stderr, "Error creating PUSCH object\n");
+    if (srsran_pusch_init_enb(&q->pusch, max_prb)) {
+      ERROR("Error creating PUSCH object");
       goto clean_exit;
     }
 
-    srslte_pucch_set_threshold(&q->pucch, 0.8);
-
-    if (srslte_chest_ul_init(&q->chest, max_prb)) {
-      fprintf(stderr, "Error initiating channel estimator\n");
-      goto clean_exit; 
+    if (srsran_chest_ul_init(&q->chest, max_prb)) {
+      ERROR("Error initiating channel estimator");
+      goto clean_exit;
     }
 
-    ret = SRSLTE_SUCCESS;
-    
+    ret = SRSRAN_SUCCESS;
+
   } else {
-    fprintf(stderr, "Invalid parameters\n");
+    ERROR("Invalid parameters");
   }
 
-clean_exit: 
-  if (ret == SRSLTE_ERROR) {
-    srslte_enb_ul_free(q);
+clean_exit:
+  if (ret == SRSRAN_ERROR) {
+    srsran_enb_ul_free(q);
   }
   return ret;
 }
 
-void srslte_enb_ul_free(srslte_enb_ul_t *q)
+void srsran_enb_ul_free(srsran_enb_ul_t* q)
 {
   if (q) {
-    
-    if (q->users) {
-      for (int i=0;i<=SRSLTE_SIRNTI;i++) {
-        if (q->users[i]) {
-          free(q->users[i]);
-        }
-      }
-      free(q->users);
-    }
-    
-    srslte_prach_free(&q->prach);
-    srslte_ofdm_rx_free(&q->fft);
-    srslte_pucch_free(&q->pucch);
-    srslte_pusch_free(&q->pusch);
-    srslte_chest_ul_free(&q->chest);
+    srsran_ofdm_rx_free(&q->fft);
+    srsran_pucch_free(&q->pucch);
+    srsran_pusch_free(&q->pusch);
+    srsran_chest_ul_free(&q->chest);
+
     if (q->sf_symbols) {
       free(q->sf_symbols);
     }
-    if (q->ce) {
-      free(q->ce);
+    if (q->chest_res.ce) {
+      free(q->chest_res.ce);
     }
-    bzero(q, sizeof(srslte_enb_ul_t));
-  }  
+    bzero(q, sizeof(srsran_enb_ul_t));
+  }
 }
 
-int srslte_enb_ul_set_cell(srslte_enb_ul_t *q, srslte_cell_t cell,
-                           srslte_prach_cfg_t *prach_cfg,
-                           srslte_refsignal_dmrs_pusch_cfg_t *pusch_cfg,
-                           srslte_pusch_hopping_cfg_t *hopping_cfg,
-                           srslte_pucch_cfg_t *pucch_cfg)
+int srsran_enb_ul_set_cell(srsran_enb_ul_t*                   q,
+                           srsran_cell_t                      cell,
+                           srsran_refsignal_dmrs_pusch_cfg_t* pusch_cfg,
+                           srsran_refsignal_srs_cfg_t*        srs_cfg)
 {
-  int ret = SRSLTE_ERROR_INVALID_INPUTS;
+  int ret = SRSRAN_ERROR_INVALID_INPUTS;
 
-  if (q                 != NULL &&
-      srslte_cell_isvalid(&cell))
-  {
+  if (q != NULL && srsran_cell_isvalid(&cell)) {
     if (cell.id != q->cell.id || q->cell.nof_prb == 0) {
-      memcpy(&q->cell, &cell, sizeof(srslte_cell_t));
+      q->cell = cell;
 
-      if (hopping_cfg) {
-        memcpy(&q->hopping_cfg, hopping_cfg, sizeof(srslte_pusch_hopping_cfg_t));
+      srsran_ofdm_cfg_t ofdm_cfg = {};
+      ofdm_cfg.nof_prb           = q->cell.nof_prb;
+      ofdm_cfg.in_buffer         = q->in_buffer;
+      ofdm_cfg.out_buffer        = q->sf_symbols;
+      ofdm_cfg.cp                = q->cell.cp;
+      ofdm_cfg.freq_shift_f      = -0.5f;
+      ofdm_cfg.normalize         = false;
+      ofdm_cfg.rx_window_offset  = 0.5f;
+      if (srsran_ofdm_rx_init_cfg(&q->fft, &ofdm_cfg)) {
+        ERROR("Error initiating FFT");
+        return SRSRAN_ERROR;
+      }
+      if (srsran_ofdm_rx_set_prb(&q->fft, q->cell.cp, q->cell.nof_prb)) {
+        ERROR("Error initiating FFT");
+        return SRSRAN_ERROR;
       }
 
-      if (srslte_ofdm_rx_set_prb(&q->fft, q->cell.cp, q->cell.nof_prb)) {
-        fprintf(stderr, "Error initiating FFT\n");
-        return SRSLTE_ERROR;
+      if (srsran_pucch_set_cell(&q->pucch, q->cell)) {
+        ERROR("Error creating PUCCH object");
+        return SRSRAN_ERROR;
       }
 
-      if (srslte_pucch_set_cell(&q->pucch, q->cell)) {
-        fprintf(stderr, "Error creating PUCCH object\n");
-        return SRSLTE_ERROR;
+      if (srsran_pusch_set_cell(&q->pusch, q->cell)) {
+        ERROR("Error creating PUSCH object");
+        return SRSRAN_ERROR;
       }
 
-      if (srslte_pusch_set_cell(&q->pusch, q->cell)) {
-        fprintf(stderr, "Error creating PUSCH object\n");
-        return SRSLTE_ERROR;
+      if (srsran_chest_ul_set_cell(&q->chest, cell)) {
+        ERROR("Error initiating channel estimator");
+        return SRSRAN_ERROR;
       }
-
-      if (prach_cfg) {
-        if (srslte_prach_init_cfg(&q->prach, prach_cfg, q->cell.nof_prb)) {
-          fprintf(stderr, "Error initiating PRACH\n");
-          return SRSLTE_ERROR;
-        }
-        srslte_prach_set_detect_factor(&q->prach, 60);
-      }
-
-      if (srslte_chest_ul_set_cell(&q->chest, cell)) {
-        fprintf(stderr, "Error initiating channel estimator\n");
-        return SRSLTE_ERROR;
-      }
-
-      // Configure common PUCCH configuration
-      srslte_pucch_set_cfg(&q->pucch, pucch_cfg, pusch_cfg->group_hopping_en);
 
       // SRS is a dedicated configuration
-      srslte_chest_ul_set_cfg(&q->chest, pusch_cfg, pucch_cfg, NULL);
+      srsran_chest_ul_pregen(&q->chest, pusch_cfg, srs_cfg);
 
-      ret = SRSLTE_SUCCESS;
+      ret = SRSRAN_SUCCESS;
     }
   } else {
-    fprintf(stderr, "Invalid cell properties: Id=%d, Ports=%d, PRBs=%d\n",
-            cell.id, cell.nof_ports, cell.nof_prb);
+    ERROR("Invalid cell properties: Id=%d, Ports=%d, PRBs=%d", cell.id, cell.nof_ports, cell.nof_prb);
   }
   return ret;
 }
 
-
-int srslte_enb_ul_add_rnti(srslte_enb_ul_t *q, uint16_t rnti)
+void srsran_enb_ul_fft(srsran_enb_ul_t* q)
 {
-  if (!q->users[rnti]) {
-    q->users[rnti] = calloc(1, sizeof(srslte_enb_ul_user_t));
-
-    if (srslte_pucch_set_crnti(&q->pucch, rnti)) {
-      fprintf(stderr, "Error setting PUCCH rnti\n");
-      return -1;
-    }
-    if (srslte_pusch_set_rnti(&q->pusch, rnti)) {
-      fprintf(stderr, "Error setting PUSCH rnti\n");
-      return -1; 
-    }
-    return 0; 
-  } else {
-    fprintf(stderr, "Error adding rnti=0x%x, already exists\n", rnti);
-    return -1; 
-  }
+  srsran_ofdm_rx_sf(&q->fft);
 }
 
-void srslte_enb_ul_rem_rnti(srslte_enb_ul_t *q, uint16_t rnti)
+static int get_pucch(srsran_enb_ul_t* q, srsran_ul_sf_cfg_t* ul_sf, srsran_pucch_cfg_t* cfg, srsran_pucch_res_t* res)
 {
-  if (q->users[rnti]) {
-    free(q->users[rnti]); 
-    q->users[rnti] = NULL; 
-    srslte_pusch_free_rnti(&q->pusch, rnti);
-  }
-}
+  int      ret                               = SRSRAN_SUCCESS;
+  uint32_t n_pucch_i[SRSRAN_PUCCH_MAX_ALLOC] = {};
+  uint32_t uci_cfg_total_ack                 = srsran_uci_cfg_total_ack(&cfg->uci_cfg);
 
-int srslte_enb_ul_cfg_ue(srslte_enb_ul_t *q, uint16_t rnti, 
-                         srslte_uci_cfg_t *uci_cfg, 
-                         srslte_pucch_sched_t *pucch_sched,
-                         srslte_refsignal_srs_cfg_t *srs_cfg) 
-{
-  if (q->users[rnti]) {
-    if (uci_cfg) {
-      memcpy(&q->users[rnti]->uci_cfg, uci_cfg, sizeof(srslte_uci_cfg_t));
-      q->users[rnti]->uci_cfg_en = true; 
+  // Drop CQI if there is collision with ACK
+  if (!cfg->simul_cqi_ack && uci_cfg_total_ack > 0 && cfg->uci_cfg.cqi.data_enable) {
+    cfg->uci_cfg.cqi.data_enable = false;
+  }
+
+  // Select format
+  cfg->format = srsran_pucch_proc_select_format(&q->cell, cfg, &cfg->uci_cfg, NULL);
+  if (cfg->format == SRSRAN_PUCCH_FORMAT_ERROR) {
+    ERROR("Returned Error while selecting PUCCH format");
+    return SRSRAN_ERROR;
+  }
+
+  // Get possible resources
+  int nof_resources = srsran_pucch_proc_get_resources(&q->cell, cfg, &cfg->uci_cfg, NULL, n_pucch_i);
+  if (nof_resources < 1 || nof_resources > SRSRAN_PUCCH_CS_MAX_ACK) {
+    ERROR("No PUCCH resource could be calculated (%d)", nof_resources);
+    return SRSRAN_ERROR;
+  }
+
+  // Initialise minimum correlation
+  res->correlation = 0.0f;
+
+  // Iterate possible resources and select the one with higher correlation
+  for (int i = 0; i < nof_resources && ret == SRSRAN_SUCCESS; i++) {
+    srsran_pucch_res_t pucch_res = {};
+
+    // Configure resource
+    cfg->n_pucch = n_pucch_i[i];
+
+    // Prepare configuration
+    if (srsran_chest_ul_estimate_pucch(&q->chest, ul_sf, cfg, q->sf_symbols, &q->chest_res)) {
+      ERROR("Error estimating PUCCH DMRS");
+      return SRSRAN_ERROR;
+    }
+    pucch_res.snr_db    = q->chest_res.snr_db;
+    pucch_res.rssi_dbFs = q->chest_res.epre_dBfs;
+    pucch_res.ni_dbFs   = q->chest_res.noise_estimate_dbFs;
+
+    ret = srsran_pucch_decode(&q->pucch, ul_sf, cfg, &q->chest_res, q->sf_symbols, &pucch_res);
+    if (ret < SRSRAN_SUCCESS) {
+      ERROR("Error decoding PUCCH");
     } else {
-      q->users[rnti]->uci_cfg_en = false; 
-    }
-    if (pucch_sched) {
-      memcpy(&q->users[rnti]->pucch_sched, pucch_sched, sizeof(srslte_pucch_sched_t));
-    }
-    if (srs_cfg) {
-      memcpy(&q->users[rnti]->srs_cfg, srs_cfg, sizeof(srslte_refsignal_srs_cfg_t));
-      q->users[rnti]->srs_cfg_en = true; 
-    } else {
-      q->users[rnti]->srs_cfg_en = false; 
-    }
-    return SRSLTE_SUCCESS;
-  } else {
-    fprintf(stderr, "Error configuring UE: rnti=0x%x not found\n", rnti);
-    return SRSLTE_ERROR; 
-  }
-}
-
-void srslte_enb_ul_fft(srslte_enb_ul_t *q)
-{
-  srslte_ofdm_rx_sf(&q->fft);
-}
-
-int get_pucch(srslte_enb_ul_t *q, uint16_t rnti, 
-              uint32_t pdcch_n_cce, uint32_t sf_rx, 
-              srslte_uci_data_t *uci_data, uint8_t bits[SRSLTE_PUCCH_MAX_BITS], uint32_t nof_bits)
-{
-  float noise_power = srslte_chest_ul_get_noise_estimate(&q->chest); 
-  
-  srslte_pucch_format_t format = srslte_pucch_get_format(uci_data, q->cell.cp);
-  if (format == SRSLTE_PUCCH_FORMAT_ERROR) {
-    fprintf(stderr,"Error getting format\n");
-    return SRSLTE_ERROR;
-  }
-    
-  uint32_t n_pucch = srslte_pucch_get_npucch(pdcch_n_cce, format, uci_data->scheduling_request, &q->users[rnti]->pucch_sched);
-  
-  if (srslte_chest_ul_estimate_pucch(&q->chest, q->sf_symbols, q->ce, format, n_pucch, sf_rx, &bits[20])) {
-    fprintf(stderr,"Error estimating PUCCH DMRS\n");
-    return SRSLTE_ERROR;
-  }
-  
-  int ret_val = srslte_pucch_decode(&q->pucch, format, n_pucch, sf_rx, rnti, q->sf_symbols, q->ce, noise_power, bits, nof_bits);
-  if (ret_val < 0) {
-    fprintf(stderr,"Error decoding PUCCH\n");
-    return SRSLTE_ERROR; 
-  }
-  return ret_val;
-}
-
-int srslte_enb_ul_get_pucch(srslte_enb_ul_t *q, uint16_t rnti, 
-                            uint32_t pdcch_n_cce, uint32_t sf_rx, 
-                            srslte_uci_data_t *uci_data)
-{
-  uint8_t pucch_bits[SRSLTE_PUCCH_MAX_BITS];
-
-  if (q->users[rnti]) {
-    uint32_t nof_uci_bits = uci_data->ri_periodic_report ? uci_data->uci_ri_len : (uci_data->uci_cqi_len);
-    int ret_val = get_pucch(q, rnti, pdcch_n_cce, sf_rx, uci_data, pucch_bits, nof_uci_bits);
-
-    // If we are looking for SR and ACK at the same time and ret=0, means there is no SR. 
-    // try again to decode ACK only 
-    if (uci_data->scheduling_request && uci_data->uci_ack_len && ret_val != 1) {
-      uci_data->scheduling_request = false; 
-      ret_val = get_pucch(q, rnti, pdcch_n_cce, sf_rx, uci_data, pucch_bits, nof_uci_bits);
-    }
-
-    // update schedulign request 
-    if (uci_data->scheduling_request) {
-      uci_data->scheduling_request = (ret_val==1); 
-    }
-    
-    // Save ACK bits 
-    if (uci_data->uci_ack_len > 0) {
-      uci_data->uci_ack = pucch_bits[0];
-    }
-
-    if (uci_data->uci_ack_len > 1) {
-      uci_data->uci_ack_2 = pucch_bits[1];
-    }
-    
-    // PUCCH2 CQI bits are decoded inside srslte_pucch_decode() 
-    if (uci_data->uci_cqi_len) {
-      memcpy(uci_data->uci_cqi, pucch_bits, uci_data->uci_cqi_len*sizeof(uint8_t));
-    }
-
-    if (uci_data->uci_ri_len) {
-      uci_data->uci_ri = pucch_bits[0]; /* Assume only one bit of RI */
-    }
-
-    if (uci_data->uci_cqi_len || uci_data->uci_ri_len) {
-      if (uci_data->uci_ack_len >= 1) {
-        uci_data->uci_ack = pucch_bits[20];
+      // Get PUCCH Format 1b with channel selection if:
+      // - At least one ACK bit needs to be received; and
+      // - PUCCH Format 1b was used; and
+      // - HARQ feedback mode is set to PUCCH Format1b with Channel Selection (CS); and
+      // - No scheduling request is expected; and
+      // - Data is valid (invalid data does not make sense to decode).
+      if (uci_cfg_total_ack > 0 && cfg->format == SRSRAN_PUCCH_FORMAT_1B &&
+          cfg->ack_nack_feedback_mode == SRSRAN_PUCCH_ACK_NACK_FEEDBACK_MODE_CS &&
+          !cfg->uci_cfg.is_scheduling_request_tti && pucch_res.uci_data.ack.valid) {
+        uint8_t b[2] = {pucch_res.uci_data.ack.ack_value[0], pucch_res.uci_data.ack.ack_value[1]};
+        srsran_pucch_cs_get_ack(cfg, &cfg->uci_cfg, i, b, &pucch_res.uci_data);
       }
-      if (uci_data->uci_ack_len == 2) {
-        uci_data->uci_ack_2 = pucch_bits[21];
+
+      // Compares correlation value, it stores the PUCCH result with the greatest correlation
+      if (i == 0 || pucch_res.correlation > res->correlation) {
+        // Copy measurements only if PUCCH was decoded successfully
+        if (cfg->meas_ta_en) {
+          pucch_res.ta_valid = !(isnan(q->chest_res.ta_us) || isinf(q->chest_res.ta_us));
+          pucch_res.ta_us    = q->chest_res.ta_us;
+        }
+
+        *res = pucch_res;
       }
     }
-
-    return SRSLTE_SUCCESS;
-  } else {
-    fprintf(stderr, "Error getting PUCCH: rnti=0x%x not found\n", rnti);
-    return SRSLTE_ERROR; 
   }
+
+  return ret;
 }
 
-int srslte_enb_ul_get_pusch(srslte_enb_ul_t *q, srslte_ra_ul_grant_t *grant, srslte_softbuffer_rx_t *softbuffer, 
-                            uint16_t rnti, uint32_t rv_idx, uint32_t current_tx_nb, 
-                            uint8_t *data, srslte_cqi_value_t *cqi_value, srslte_uci_data_t *uci_data, uint32_t tti)
+int srsran_enb_ul_get_pucch(srsran_enb_ul_t*    q,
+                            srsran_ul_sf_cfg_t* ul_sf,
+                            srsran_pucch_cfg_t* cfg,
+                            srsran_pucch_res_t* res)
 {
-  if (q->users[rnti]) {
-    if (srslte_pusch_cfg(&q->pusch, 
-                        &q->pusch_cfg, 
-                        grant, 
-                        q->users[rnti]->uci_cfg_en?&q->users[rnti]->uci_cfg:NULL, 
-                        &q->hopping_cfg, 
-                        q->users[rnti]->srs_cfg_en?&q->users[rnti]->srs_cfg:NULL, 
-                        tti, rv_idx, current_tx_nb)) {
-      fprintf(stderr, "Error configuring PDSCH\n");
-      return SRSLTE_ERROR;
+  if (!srsran_pucch_cfg_isvalid(cfg, q->cell.nof_prb)) {
+    ERROR("Invalid PUCCH configuration");
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+
+  if (get_pucch(q, ul_sf, cfg, res)) {
+    return SRSRAN_ERROR;
+  }
+
+  // If we are looking for SR and ACK at the same time and ret=0, means there is no SR.
+  // try again to decode ACK only
+  if (cfg->uci_cfg.is_scheduling_request_tti && srsran_uci_cfg_total_ack(&cfg->uci_cfg)) {
+    // Disable SR
+    cfg->uci_cfg.is_scheduling_request_tti = false;
+
+    // Init PUCCH result without SR
+    srsran_pucch_res_t res_no_sr = {};
+
+    // Actual decode without SR
+    if (get_pucch(q, ul_sf, cfg, &res_no_sr)) {
+      return SRSRAN_ERROR;
     }
-  } else {
-      if (srslte_pusch_cfg(&q->pusch, 
-                        &q->pusch_cfg, 
-                        grant, 
-                        NULL, 
-                        &q->hopping_cfg, 
-                        NULL, 
-                        tti, rv_idx, current_tx_nb)) {
-      fprintf(stderr, "Error configuring PDSCH\n");
-      return SRSLTE_ERROR;
+
+    // Override PUCCH result if PUCCH without SR was detected, and
+    // - no PUCCH with SR was detected; or
+    // - PUCCH without SR has better correlation
+    if (res_no_sr.detected && (!res->detected || res_no_sr.correlation > res->correlation)) {
+      *res = res_no_sr;
+    } else {
+      // If the PUCCH decode result is not overridden, flag SR
+      cfg->uci_cfg.is_scheduling_request_tti = true;
     }
   }
-  
-  uint32_t cyclic_shift_for_dmrs = 0; 
-  
-  srslte_chest_ul_estimate(&q->chest, q->sf_symbols, q->ce, grant->L_prb, tti%10, cyclic_shift_for_dmrs, grant->n_prb);
-  
-  float noise_power = srslte_chest_ul_get_noise_estimate(&q->chest); 
-  
-  return srslte_pusch_decode(&q->pusch, &q->pusch_cfg, 
-                              softbuffer, q->sf_symbols, 
-                              q->ce, noise_power, 
-                              rnti, data, 
-                              cqi_value,
-                              uci_data);
+
+  return SRSRAN_SUCCESS;
 }
 
-
-int srslte_enb_ul_detect_prach(srslte_enb_ul_t *q, uint32_t tti, 
-                               uint32_t freq_offset, cf_t *signal, 
-                               uint32_t *indices, float *offsets, float *peak2avg)
+int srsran_enb_ul_get_pusch(srsran_enb_ul_t*    q,
+                            srsran_ul_sf_cfg_t* ul_sf,
+                            srsran_pusch_cfg_t* cfg,
+                            srsran_pusch_res_t* res)
 {
-  uint32_t nof_detected_prach = 0; 
-  // consider the number of subframes the transmission must be anticipated 
-  if (srslte_prach_tti_opportunity(&q->prach, tti, -1)) 
-  {
-    
-    if (srslte_prach_detect_offset(&q->prach,
-                                   freq_offset,
-                                   &signal[q->prach.N_cp],
-                                   SRSLTE_SF_LEN_PRB(q->cell.nof_prb),
-                                   indices, 
-                                   offsets,
-                                   peak2avg,
-                                   &nof_detected_prach)) 
-    {
-      fprintf(stderr, "Error detecting PRACH\n");
-      return SRSLTE_ERROR; 
-    }
-  } 
-  return (int) nof_detected_prach; 
+  srsran_chest_ul_estimate_pusch(&q->chest, ul_sf, cfg, q->sf_symbols, &q->chest_res);
+
+  return srsran_pusch_decode(&q->pusch, ul_sf, cfg, &q->chest_res, q->sf_symbols, res);
 }
-
-
-
-
-

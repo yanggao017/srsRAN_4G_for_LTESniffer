@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2015 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of the srsLTE library.
- *
- * srsLTE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsLTE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,25 +19,26 @@
  *
  */
 
+#include <complex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <unistd.h>
-#include <complex.h>
-#include <srslte/phy/common/phy_common.h>
 
-#include "srslte/srslte.h"
+#include "srsran/srsran.h"
 
-srslte_cell_t cell = {
-  6,            // nof_prb
-  1,    // nof_ports
-  1000,         // cell_id
-  SRSLTE_CP_NORM        // cyclic prefix
-};
+srsran_cell_t cell = {6,              // nof_prb
+                      1,              // nof_ports
+                      1000,           // cell_id
+                      SRSRAN_CP_NORM, // cyclic prefix
+                      SRSRAN_PHICH_NORM,
+                      SRSRAN_PHICH_R_1_6,
+                      SRSRAN_FDD};
 
-char *output_matlab = NULL;
+char* output_matlab = NULL;
 
-void usage(char *prog) {
+void usage(char* prog)
+{
   printf("Usage: %s [recov]\n", prog);
 
   printf("\t-r nof_prb [Default %d]\n", cell.nof_prb);
@@ -50,180 +46,189 @@ void usage(char *prog) {
 
   printf("\t-c cell_id (1000 tests all). [Default %d]\n", cell.id);
 
-  printf("\t-o output matlab file [Default %s]\n",output_matlab?output_matlab:"None");
+  printf("\t-o output matlab file [Default %s]\n", output_matlab ? output_matlab : "None");
   printf("\t-v increase verbosity\n");
 }
 
-void parse_args(int argc, char **argv) {
+void parse_args(int argc, char** argv)
+{
   int opt;
   while ((opt = getopt(argc, argv, "recov")) != -1) {
-    switch(opt) {
-    case 'r':
-      cell.nof_prb = atoi(argv[optind]);
-      break;
-    case 'e':
-      cell.cp = SRSLTE_CP_EXT;
-      break;
-    case 'c':
-      cell.id = atoi(argv[optind]);
-      break;
-    case 'o':
-      output_matlab = argv[optind];
-      break;
-    case 'v':
-      srslte_verbose++;
-      break;
-    default:
-      usage(argv[0]);
-      exit(-1);
+    switch (opt) {
+      case 'r':
+        cell.nof_prb = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'e':
+        cell.cp = SRSRAN_CP_EXT;
+        break;
+      case 'c':
+        cell.id = (uint32_t)strtol(argv[optind], NULL, 10);
+        break;
+      case 'o':
+        output_matlab = argv[optind];
+        break;
+      case 'v':
+        increase_srsran_verbose_level();
+        break;
+      default:
+        usage(argv[0]);
+        exit(-1);
     }
   }
 }
 
+int main(int argc, char** argv)
+{
+  srsran_chest_dl_t est;
+  cf_t *            input = NULL, *ce = NULL, *h = NULL, *output = NULL;
+  int               i, j;
+  int               ret = -1;
+  int               max_cid;
+  FILE*             fmatlab = NULL;
+  uint32_t          cid     = 0;
 
-int main(int argc, char **argv) {
-  srslte_chest_dl_t est;
-  cf_t *input = NULL, *ce = NULL, *h = NULL, *output = NULL;
-  int i, j, n_port=0, sf_idx=0, cid=0, num_re;
-  int ret = -1;
-  int max_cid;
-  FILE *fmatlab = NULL;
-  
-  parse_args(argc,argv);
+  parse_args(argc, argv);
 
   if (output_matlab) {
-    fmatlab=fopen(output_matlab, "w");
+    fmatlab = fopen(output_matlab, "w");
     if (!fmatlab) {
       perror("fopen");
       goto do_exit;
     }
   }
 
-  num_re = 2 * cell.nof_prb * SRSLTE_NRE * SRSLTE_CP_NSYMB(cell.cp);
+  uint32_t num_re = 2 * cell.nof_prb * SRSRAN_NRE * SRSRAN_CP_NSYMB(cell.cp);
 
-  input = srslte_vec_malloc(num_re * sizeof(cf_t));
+  input = srsran_vec_cf_malloc(num_re);
   if (!input) {
-    perror("srslte_vec_malloc");
+    perror("srsran_vec_malloc");
     goto do_exit;
   }
-  output = srslte_vec_malloc(num_re * sizeof(cf_t));
+  output = srsran_vec_cf_malloc(num_re);
   if (!output) {
-    perror("srslte_vec_malloc");
+    perror("srsran_vec_malloc");
     goto do_exit;
   }
-  h = srslte_vec_malloc(num_re * sizeof(cf_t));
+  h = srsran_vec_cf_malloc(num_re);
   if (!h) {
-    perror("srslte_vec_malloc");
+    perror("srsran_vec_malloc");
     goto do_exit;
   }
-  ce = srslte_vec_malloc(num_re * sizeof(cf_t));
+  ce = srsran_vec_cf_malloc(num_re);
   if (!ce) {
-    perror("srslte_vec_malloc");
+    perror("srsran_vec_malloc");
     goto do_exit;
   }
 
   if (cell.id == 1000) {
-    cid = 0;
+    cid     = 0;
     max_cid = 504;
   } else {
-    cid = cell.id;
+    cid     = cell.id;
     max_cid = cell.id;
   }
-  if (srslte_chest_dl_init(&est, cell.nof_prb)) {
-    fprintf(stderr, "Error initializing equalizer\n");
+  if (srsran_chest_dl_init(&est, cell.nof_prb, 1)) {
+    ERROR("Error initializing equalizer");
     goto do_exit;
   }
-  while(cid <= max_cid) {
-    cell.id = cid; 
-    if (srslte_chest_dl_set_cell(&est, cell)) {
-      fprintf(stderr, "Error initializing equalizer\n");
+  while (cid <= max_cid) {
+    cell.id = cid;
+    if (srsran_chest_dl_set_cell(&est, cell)) {
+      ERROR("Error initializing equalizer");
       goto do_exit;
     }
 
-    for (sf_idx=0;sf_idx<1;sf_idx++) {
-      for (n_port=0;n_port<cell.nof_ports;n_port++) {
+    for (uint32_t sf_idx = 0; sf_idx < 1; sf_idx++) {
+      srsran_dl_sf_cfg_t sf_cfg;
+      ZERO_OBJECT(sf_cfg);
+      sf_cfg.tti = sf_idx;
 
-        bzero(input, sizeof(cf_t) * num_re);
-        for (i=0;i<num_re;i++) {
-          input[i] = 0.5-rand()/RAND_MAX+I*(0.5-rand()/RAND_MAX);
+      for (uint32_t n_port = 0; n_port < cell.nof_ports; n_port++) {
+        srsran_vec_cf_zero(input, num_re);
+        for (i = 0; i < num_re; i++) {
+          input[i] = 0.5 - rand() / (float)RAND_MAX + I * (0.5 - rand() / (float)RAND_MAX);
         }
 
-        bzero(ce, sizeof(cf_t) * num_re);
-        bzero(h, sizeof(cf_t) * num_re);
+        srsran_vec_cf_zero(ce, num_re);
+        srsran_vec_cf_zero(h, num_re);
 
-        srslte_refsignal_cs_put_sf(cell, n_port, 
-                            est.csr_refs.pilots[n_port/2][sf_idx], input);
+        srsran_refsignal_cs_put_sf(&est.csr_refs, &sf_cfg, n_port, input);
 
-        for (i=0;i<2*SRSLTE_CP_NSYMB(cell.cp);i++) {
-          for (j=0;j<cell.nof_prb * SRSLTE_NRE;j++) {
-            float x = -1+(float) i/SRSLTE_CP_NSYMB(cell.cp) + cosf(2 * M_PI * (float) j/cell.nof_prb/SRSLTE_NRE);
-            h[i*cell.nof_prb * SRSLTE_NRE+j] = (3+x) * cexpf(I * x);
-            input[i*cell.nof_prb * SRSLTE_NRE+j] *= h[i*cell.nof_prb * SRSLTE_NRE+j];            
+        for (i = 0; i < 2 * SRSRAN_CP_NSYMB(cell.cp); i++) {
+          for (j = 0; j < cell.nof_prb * SRSRAN_NRE; j++) {
+            float x = -1 + (float)i / SRSRAN_CP_NSYMB(cell.cp) + cosf(2 * M_PI * (float)j / cell.nof_prb / SRSRAN_NRE);
+            h[i * cell.nof_prb * SRSRAN_NRE + j] = (3 + x) * cexpf(I * x);
+            input[i * cell.nof_prb * SRSRAN_NRE + j] *= h[i * cell.nof_prb * SRSRAN_NRE + j];
           }
         }
+      }
 
-        struct timeval t[3];
-        gettimeofday(&t[1], NULL);
-        for (int j=0;j<100;j++) {
-          srslte_chest_dl_estimate_port(&est, input, ce, sf_idx, n_port, 0);          
-        }
-        gettimeofday(&t[2], NULL);
-        get_time_interval(t);
-        printf("CHEST: %f us\n", (float) t[0].tv_usec/100);
-        
-        gettimeofday(&t[1], NULL);
-        for (int j=0;j<100;j++) {
-          srslte_predecoding_single(input, ce, output, num_re, 1.0f, 0);
-        }
-        gettimeofday(&t[2], NULL);
-        get_time_interval(t);
-        printf("CHEQ-ZF: %f us\n", (float) t[0].tv_usec/100);
+      srsran_chest_dl_res_t res;
 
-        float mse = 0;
-        for (i=0;i<num_re;i++) {
-          mse += cabsf(input[i]-output[i]);
-        }
-        mse /= num_re;
-        printf("MSE: %f\n", mse);
+      res.ce[0][0] = ce;
 
-        gettimeofday(&t[1], NULL);
-        for (int j=0;j<100;j++) {
-          srslte_predecoding_single(input, ce, output, num_re, 1.0f, srslte_chest_dl_get_noise_estimate(&est));
-        }
-        gettimeofday(&t[2], NULL);
-        get_time_interval(t);
-        printf("CHEQ-MMSE: %f us\n", (float) t[0].tv_usec/100);
-        
-        mse = 0;
-        for (i=0;i<num_re;i++) {
-          mse += cabsf(input[i]-output[i]);
-        }
-        mse /= num_re;
-        printf("MSE: %f\n", mse);
+      cf_t* input_m[SRSRAN_MAX_PORTS];
+      input_m[0] = input;
 
-        if (mse > 2.0) {
-          goto do_exit;
-        }
-        
-        if (fmatlab) {
-          fprintf(fmatlab, "input=");
-          srslte_vec_fprint_c(fmatlab, input, num_re);
-          fprintf(fmatlab, ";\n");
-          fprintf(fmatlab, "h=");
-          srslte_vec_fprint_c(fmatlab, h, num_re);
-          fprintf(fmatlab, ";\n");
-          fprintf(fmatlab, "ce=");
-          srslte_vec_fprint_c(fmatlab, ce, num_re);
-          fprintf(fmatlab, ";\n");
-        }
+      struct timeval t[3];
+      gettimeofday(&t[1], NULL);
+      for (int k = 0; k < 100; k++) {
+        srsran_chest_dl_estimate(&est, &sf_cfg, input_m, &res);
+      }
+      gettimeofday(&t[2], NULL);
+      get_time_interval(t);
+      printf("CHEST: %f us\n", (float)t[0].tv_usec / 100);
+
+      gettimeofday(&t[1], NULL);
+      for (int k = 0; k < 100; k++) {
+        srsran_predecoding_single(input, ce, output, NULL, num_re, 1.0f, 0);
+      }
+      gettimeofday(&t[2], NULL);
+      get_time_interval(t);
+      printf("CHEQ-ZF: %f us\n", (float)t[0].tv_usec / 100);
+
+      float mse = 0;
+      for (i = 0; i < num_re; i++) {
+        mse += cabsf(input[i] - output[i]);
+      }
+      mse /= num_re;
+      printf("MSE: %f\n", mse);
+
+      gettimeofday(&t[1], NULL);
+      for (int k = 0; k < 100; k++) {
+        srsran_predecoding_single(input, ce, output, NULL, num_re, 1.0f, res.noise_estimate);
+      }
+      gettimeofday(&t[2], NULL);
+      get_time_interval(t);
+      printf("CHEQ-MMSE: %f us\n", (float)t[0].tv_usec / 100);
+
+      mse = 0;
+      for (i = 0; i < num_re; i++) {
+        mse += cabsf(input[i] - output[i]);
+      }
+      mse /= num_re;
+      printf("MSE: %f\n", mse);
+
+      if (mse > 2.0) {
+        goto do_exit;
+      }
+
+      if (fmatlab) {
+        fprintf(fmatlab, "input=");
+        srsran_vec_fprint_c(fmatlab, input, num_re);
+        fprintf(fmatlab, ";\n");
+        fprintf(fmatlab, "h=");
+        srsran_vec_fprint_c(fmatlab, h, num_re);
+        fprintf(fmatlab, ";\n");
+        fprintf(fmatlab, "ce=");
+        srsran_vec_fprint_c(fmatlab, ce, num_re);
+        fprintf(fmatlab, ";\n");
       }
     }
-    cid+=10;
-    INFO("cid=%d\n", cid);
+    cid += 10;
+    INFO("cid=%d", cid);
   }
-  srslte_chest_dl_free(&est);
-
-
+  srsran_chest_dl_free(&est);
   ret = 0;
 
 do_exit:
@@ -244,7 +249,7 @@ do_exit:
   if (!ret) {
     printf("OK\n");
   } else {
-    printf("Error at cid=%d, slot=%d, port=%d\n",cid, sf_idx, n_port);
+    printf("Error at cid=%d\n", cid);
   }
 
   exit(ret);

@@ -1,19 +1,14 @@
 /**
+ * Copyright 2013-2023 Software Radio Systems Limited
  *
- * \section COPYRIGHT
+ * This file is part of srsRAN.
  *
- * Copyright 2013-2017 Software Radio Systems Limited
- *
- * \section LICENSE
- *
- * This file is part of srsLTE.
- *
- * srsUE is free software: you can redistribute it and/or modify
+ * srsRAN is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as
  * published by the Free Software Foundation, either version 3 of
  * the License, or (at your option) any later version.
  *
- * srsUE is distributed in the hope that it will be useful,
+ * srsRAN is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
@@ -24,295 +19,284 @@
  *
  */
 
-#include <boost/algorithm/string.hpp>
-#include <boost/thread/mutex.hpp>
-#include <enb.h>
-#include "enb.h"
+#include "srsenb/hdr/enb.h"
+#include "srsenb/hdr/stack/enb_stack_lte.h"
+#include "srsenb/hdr/x2_adapter.h"
+#include "srsenb/src/enb_cfg_parser.h"
+#include "srsgnb/hdr/stack/gnb_stack_nr.h"
+#include "srsran/build_info.h"
+#include "srsran/common/enb_events.h"
+#include "srsran/radio/radio_null.h"
+#include <iostream>
 
 namespace srsenb {
 
-enb*          enb::instance = NULL;
-boost::mutex  enb_instance_mutex;
-
-
-enb* enb::get_instance(void)
+enb::enb(srslog::sink& log_sink) :
+  started(false), log_sink(log_sink), enb_log(srslog::fetch_basic_logger("ENB", log_sink, false)), sys_proc(enb_log)
 {
-  boost::mutex::scoped_lock lock(enb_instance_mutex);
-  if(NULL == instance) {
-      instance = new enb();
-  }
-  return(instance);
-}
-void enb::cleanup(void)
-{
-  srslte_dft_exit();
-  srslte::byte_buffer_pool::cleanup();
-  boost::mutex::scoped_lock lock(enb_instance_mutex);
-  if(NULL != instance) {
-      delete instance;
-      instance = NULL;
-  }
-}
-
-enb::enb() : started(false) {
-  srslte_dft_load();
-  pool = srslte::byte_buffer_pool::get_instance();
-
-  logger = NULL;
-  args = NULL;
-
-  bzero(&rf_metrics, sizeof(rf_metrics));
+  // print build info
+  std::cout << std::endl << get_build_string() << std::endl << std::endl;
 }
 
 enb::~enb()
 {
+  eutra_stack.reset();
+  nr_stack.reset();
 }
 
-bool enb::init(all_args_t *args_)
+int enb::init(const all_args_t& args_)
 {
-  args     = args_;
+  int ret = SRSRAN_SUCCESS;
 
-  if (!args->log.filename.compare("stdout")) {
-    logger = &logger_stdout;
-  } else {
-    logger_file.init(args->log.filename, args->log.file_max_size);
-    logger_file.log("\n\n");
-    logger = &logger_file;
-  }
+  // Init eNB log
+  enb_log.set_level(srslog::basic_levels::info);
+  enb_log.info("%s", get_build_string().c_str());
 
-  rf_log.init("RF  ", logger);
-  
-  // Create array of pointers to phy_logs 
-  for (int i=0;i<args->expert.phy.nof_phy_threads;i++) {
-    srslte::log_filter *mylog = new srslte::log_filter;
-    char tmp[16];
-    sprintf(tmp, "PHY%d",i);
-    mylog->init(tmp, logger, true);
-    phy_log.push_back((void*) mylog); 
-  }
-  mac_log.init("MAC ", logger, true);
-  rlc_log.init("RLC ", logger);
-  pdcp_log.init("PDCP", logger);
-  rrc_log.init("RRC ", logger);
-  gtpu_log.init("GTPU", logger);
-  s1ap_log.init("S1AP", logger);
-
-  // Init logs
-  rf_log.set_level(srslte::LOG_LEVEL_INFO);
-  for (int i=0;i<args->expert.phy.nof_phy_threads;i++) {
-    ((srslte::log_filter*) phy_log[i])->set_level(level(args->log.phy_level));
-  }
-  mac_log.set_level(level(args->log.mac_level));
-  rlc_log.set_level(level(args->log.rlc_level));
-  pdcp_log.set_level(level(args->log.pdcp_level));
-  rrc_log.set_level(level(args->log.rrc_level));
-  gtpu_log.set_level(level(args->log.gtpu_level));
-  s1ap_log.set_level(level(args->log.s1ap_level));
-
-  for (int i=0;i<args->expert.phy.nof_phy_threads;i++) {
-    ((srslte::log_filter*) phy_log[i])->set_hex_limit(args->log.phy_hex_limit);
-  }
-  mac_log.set_hex_limit(args->log.mac_hex_limit);
-  rlc_log.set_hex_limit(args->log.rlc_hex_limit);
-  pdcp_log.set_hex_limit(args->log.pdcp_hex_limit);
-  rrc_log.set_hex_limit(args->log.rrc_hex_limit);
-  gtpu_log.set_hex_limit(args->log.gtpu_hex_limit);
-  s1ap_log.set_hex_limit(args->log.s1ap_hex_limit);
-
-  // Set up pcap and trace
-  if(args->pcap.enable)
-  {
-    mac_pcap.open(args->pcap.filename.c_str());
-    mac.start_pcap(&mac_pcap);
-  }
-  
-  // Init layers
-  
-  /* Start Radio */
-  char *dev_name = NULL;
-  if (args->rf.device_name.compare("auto")) {
-    dev_name = (char*) args->rf.device_name.c_str();
-  }
-  
-  char *dev_args = NULL;
-  if (args->rf.device_args.compare("auto")) {
-    dev_args = (char*) args->rf.device_args.c_str();
+  // Validate arguments
+  if (parse_args(args_, rrc_cfg, rrc_nr_cfg)) {
+    srsran::console("Error processing arguments.\n");
+    return SRSRAN_ERROR;
   }
 
-  if(!radio.init(dev_args, dev_name, args->enb.nof_ports))
-  {
-    printf("Failed to find device %s with args %s\n",
-           args->rf.device_name.c_str(), args->rf.device_args.c_str());
-    return false;
-  }    
-  
-  // Set RF options
-  if (args->rf.time_adv_nsamples.compare("auto")) {
-    radio.set_tx_adv(atoi(args->rf.time_adv_nsamples.c_str()));
-  }  
-  if (args->rf.burst_preamble.compare("auto")) {
-    radio.set_burst_preamble(atof(args->rf.burst_preamble.c_str()));    
-  }
-  
-  radio.set_manual_calibration(&args->rf_cal);
+  srsran::byte_buffer_pool::get_instance()->enable_logger(true);
 
-  radio.set_rx_gain(args->rf.rx_gain);
-  radio.set_tx_gain(args->rf.tx_gain);    
-  
-  if (args->rf.dl_freq < 0) {
-    args->rf.dl_freq = 1e6*srslte_band_fd(args->rf.dl_earfcn); 
-    if (args->rf.dl_freq < 0) {
-      fprintf(stderr, "Error getting DL frequency for EARFCN=%d\n", args->rf.dl_earfcn);
-      return false; 
-    }  
-  }
-  if (args->rf.ul_freq < 0) {
-    if (args->rf.ul_earfcn == 0) {
-      args->rf.ul_earfcn = srslte_band_ul_earfcn(args->rf.dl_earfcn);
+  // Create layers
+  std::unique_ptr<enb_stack_lte> tmp_eutra_stack;
+  if (not rrc_cfg.cell_list.empty()) {
+    // add EUTRA stack
+    tmp_eutra_stack.reset(new enb_stack_lte(log_sink));
+    if (tmp_eutra_stack == nullptr) {
+      srsran::console("Error creating EUTRA stack.\n");
+      return SRSRAN_ERROR;
     }
-    args->rf.ul_freq = 1e6*srslte_band_fu(args->rf.ul_earfcn); 
-    if (args->rf.ul_freq < 0) {
-      fprintf(stderr, "Error getting UL frequency for EARFCN=%d\n", args->rf.dl_earfcn);
-      return false; 
-    }  
   }
-  ((srslte::log_filter*) phy_log[0])->console("Setting frequency: DL=%.1f Mhz, UL=%.1f MHz\n", args->rf.dl_freq/1e6, args->rf.ul_freq/1e6);
 
-  radio.set_tx_freq(args->rf.dl_freq);
-  radio.set_rx_freq(args->rf.ul_freq);
-
-  radio.register_error_handler(rf_msg);
-
-  srslte_cell_t cell_cfg; 
-  phy_cfg_t     phy_cfg; 
-  rrc_cfg_t     rrc_cfg; 
-  
-  if (parse_cell_cfg(args, &cell_cfg)) {
-    fprintf(stderr, "Error parsing Cell configuration\n");
-    return false; 
+  std::unique_ptr<gnb_stack_nr> tmp_nr_stack;
+  if (not rrc_nr_cfg.cell_list.empty()) {
+    // add NR stack
+    tmp_nr_stack.reset(new gnb_stack_nr(log_sink));
+    if (tmp_nr_stack == nullptr) {
+      srsran::console("Error creating NR stack.\n");
+      return SRSRAN_ERROR;
+    }
   }
-  if (parse_sibs(args, &rrc_cfg, &phy_cfg)) {
-    fprintf(stderr, "Error parsing SIB configuration\n");
-    return false; 
-  }
-  if (parse_rr(args, &rrc_cfg)) {
-    fprintf(stderr, "Error parsing Radio Resources configuration\n");
-    return false; 
-  }
-  if (parse_drb(args, &rrc_cfg)) {
-    fprintf(stderr, "Error parsing DRB configuration\n");
-    return false; 
-  }
-  rrc_cfg.inactivity_timeout_ms = args->expert.rrc_inactivity_timer;
-  
-  // Copy cell struct to rrc and phy 
-  memcpy(&rrc_cfg.cell, &cell_cfg, sizeof(srslte_cell_t));
-  memcpy(&phy_cfg.cell, &cell_cfg, sizeof(srslte_cell_t));
 
-  // Init all layers   
-  phy.init(&args->expert.phy, &phy_cfg, &radio, &mac, phy_log);
-  mac.init(&args->expert.mac, &cell_cfg, &phy, &rlc, &rrc, &mac_log);
-  rlc.init(&pdcp, &rrc, &mac, &mac, &rlc_log);
-  pdcp.init(&rlc, &rrc, &gtpu, &pdcp_log);
-  rrc.init(&rrc_cfg, &phy, &mac, &rlc, &pdcp, &s1ap, &gtpu, &rrc_log);
-  s1ap.init(args->enb.s1ap, &rrc, &s1ap_log);
-  gtpu.init(args->enb.s1ap.gtp_bind_addr, args->enb.s1ap.mme_addr, &pdcp, &gtpu_log);
-  
-  started = true;
-  return true;
-}
+  // If NR and EUTRA stacks were initiated, create an X2 adapter between the two.
+  if (tmp_nr_stack != nullptr and tmp_eutra_stack != nullptr) {
+    x2.reset(new x2_adapter(tmp_eutra_stack.get(), tmp_nr_stack.get()));
+  }
 
-void enb::pregenerate_signals(bool enable)
-{
-  //phy.enable_pregen_signals(enable);
+  // Radio and PHY are RAT agnostic
+  std::unique_ptr<srsran::radio> tmp_radio = std::unique_ptr<srsran::radio>(new srsran::radio);
+  if (tmp_radio == nullptr) {
+    srsran::console("Error creating radio multi instance.\n");
+    return SRSRAN_ERROR;
+  }
+
+  std::unique_ptr<srsenb::phy> tmp_phy = std::unique_ptr<srsenb::phy>(new srsenb::phy(log_sink));
+  if (tmp_phy == nullptr) {
+    srsran::console("Error creating PHY instance.\n");
+    return SRSRAN_ERROR;
+  }
+
+  // initialize layers, if they exist
+  if (tmp_eutra_stack) {
+    if (tmp_eutra_stack->init(args.stack, rrc_cfg, tmp_phy.get(), x2.get()) != SRSRAN_SUCCESS) {
+      srsran::console("Error initializing EUTRA stack.\n");
+      ret = SRSRAN_ERROR;
+    }
+  }
+
+  if (tmp_nr_stack) {
+    if (tmp_nr_stack->init(args.nr_stack, rrc_nr_cfg, tmp_phy.get(), x2.get()) != SRSRAN_SUCCESS) {
+      srsran::console("Error initializing NR stack.\n");
+      ret = SRSRAN_ERROR;
+    }
+  }
+
+  // Init Radio
+  if (tmp_radio->init(args.rf, tmp_phy.get())) {
+    srsran::console("Error initializing radio.\n");
+    return SRSRAN_ERROR;
+  }
+
+  // Only Init PHY if radio could be initialized
+  if (ret == SRSRAN_SUCCESS) {
+    if (tmp_phy->init(args.phy, phy_cfg, tmp_radio.get(), tmp_eutra_stack.get(), *tmp_nr_stack, this)) {
+      srsran::console("Error initializing PHY.\n");
+      ret = SRSRAN_ERROR;
+    }
+  }
+
+  if (tmp_eutra_stack) {
+    eutra_stack = std::move(tmp_eutra_stack);
+  }
+  if (tmp_nr_stack) {
+    nr_stack = std::move(tmp_nr_stack);
+  }
+  phy     = std::move(tmp_phy);
+  radio   = std::move(tmp_radio);
+  started = true; // set to true in any case to allow stopping the eNB if an error happened
+
+  // Now that everything is setup, log sector start events.
+  const std::string& sib9_hnb_name =
+      rrc_cfg.sibs[8].sib9().hnb_name_present ? rrc_cfg.sibs[8].sib9().hnb_name.to_string() : "";
+  for (unsigned i = 0, e = rrc_cfg.cell_list.size(); i != e; ++i) {
+    event_logger::get().log_sector_start(i, rrc_cfg.cell_list[i].pci, rrc_cfg.cell_list[i].cell_id, sib9_hnb_name);
+  }
+
+  if (ret == SRSRAN_SUCCESS) {
+    srsran::console("\n==== eNodeB started ===\n");
+    srsran::console("Type <t> to view trace\n");
+  } else {
+    // if any of the layers failed to start, make sure the rest is stopped in a controlled manner
+    stop();
+  }
+
+  return ret;
 }
 
 void enb::stop()
 {
-  if(started)
-  {
-    gtpu.stop();
-    phy.stop();
-    mac.stop();
-    usleep(100000);
-
-    rlc.stop();
-    pdcp.stop();
-    rrc.stop();
-
-    usleep(1e5);
-    if(args->pcap.enable)
-    {
-       mac_pcap.close();
+  if (started) {
+    // tear down in reverse order
+    if (_e2_agent) {
+      _e2_agent->stop();
     }
-    radio.stop();
+
+    if (phy) {
+      phy->stop();
+    }
+
+    if (radio) {
+      radio->stop();
+    }
+
+    if (eutra_stack) {
+      eutra_stack->stop();
+    }
+
+    if (nr_stack) {
+      nr_stack->stop();
+    }
+
+    // Now that everything is teared down, log sector stop events.
+    const std::string& sib9_hnb_name =
+        rrc_cfg.sibs[8].sib9().hnb_name_present ? rrc_cfg.sibs[8].sib9().hnb_name.to_string() : "";
+    for (unsigned i = 0, e = rrc_cfg.cell_list.size(); i != e; ++i) {
+      event_logger::get().log_sector_stop(i, rrc_cfg.cell_list[i].pci, rrc_cfg.cell_list[i].cell_id, sib9_hnb_name);
+    }
+
     started = false;
   }
 }
 
-void enb::start_plot() {
-  phy.start_plot();
+int enb::parse_args(const all_args_t& args_, rrc_cfg_t& rrc_cfg_, rrc_nr_cfg_t& rrc_cfg_nr_)
+{
+  // set member variable
+  args = args_;
+  return enb_conf_sections::parse_cfg_files(&args, &rrc_cfg_, &rrc_cfg_nr_, &phy_cfg);
 }
 
-bool enb::get_metrics(enb_metrics_t &m)
+void enb::start_plot()
 {
-  m.rf = rf_metrics;
-  bzero(&rf_metrics, sizeof(rf_metrics_t));
-  rf_metrics.rf_error = false; // Reset error flag
+  phy->start_plot();
+}
 
-  phy.get_metrics(m.phy);
-  mac.get_metrics(m.mac);
-  rrc.get_metrics(m.rrc);
-  s1ap.get_metrics(m.s1ap);
+bool enb::enable_e2_agent(srsenb::e2_interface_metrics* e2_metrics)
+{
+  std::unique_ptr<srsenb::e2_agent> tmp_e2_agent = std::unique_ptr<srsenb::e2_agent>(
+      new srsenb::e2_agent(srslog::fetch_basic_logger("E2_AGENT", log_sink, false), e2_metrics));
+  if (tmp_e2_agent == nullptr) {
+    srsran::console("Error creating e2_agent instance.\n");
+    return SRSRAN_ERROR;
+  }
+  if (tmp_e2_agent->init(args.e2_agent)) {
+    srsran::console("Error initializing e2_agent client.\n");
+    return SRSRAN_ERROR;
+  }
+  _e2_agent = std::move(tmp_e2_agent);
+  return SRSRAN_SUCCESS;
+}
 
-  m.running = started;  
+void enb::print_pool()
+{
+  srsran::byte_buffer_pool::get_instance()->print_all_buffers();
+}
+
+bool enb::get_metrics(enb_metrics_t* m)
+{
+  if (!started) {
+    return false;
+  }
+  radio->get_metrics(&m->rf);
+  phy->get_metrics(m->phy);
+  if (eutra_stack) {
+    eutra_stack->get_metrics(&m->stack);
+  }
+  if (nr_stack) {
+    nr_stack->get_metrics(&m->nr_stack);
+  }
+  m->running = true;
+  m->sys     = sys_proc.get_metrics();
   return true;
 }
 
-void enb::rf_msg(srslte_rf_error_t error)
+void enb::cmd_cell_gain(uint32_t cell_id, float gain)
 {
-  enb *u = enb::get_instance();
-  u->handle_rf_msg(error);
+  phy->cmd_cell_gain(cell_id, gain);
 }
 
-void enb::handle_rf_msg(srslte_rf_error_t error)
+void enb::cmd_cell_measure()
 {
-  if(error.type == srslte_rf_error_t::SRSLTE_RF_ERROR_OVERFLOW) {
-    rf_metrics.rf_o++;
-    rf_metrics.rf_error = true;
-    rf_log.warning("Overflow\n");
-  }else if(error.type == srslte_rf_error_t::SRSLTE_RF_ERROR_UNDERFLOW) {
-    rf_metrics.rf_u++;
-    rf_metrics.rf_error = true;
-    rf_log.warning("Underflow\n");
-  } else if(error.type == srslte_rf_error_t::SRSLTE_RF_ERROR_LATE) {
-    rf_metrics.rf_l++;
-    rf_metrics.rf_error = true;
-    rf_log.warning("Late\n");
-  } else if (error.type == srslte_rf_error_t::SRSLTE_RF_ERROR_OTHER) {
-    std::string str(error.msg);
-    str.erase(std::remove(str.begin(), str.end(), '\n'), str.end());
-    str.erase(std::remove(str.begin(), str.end(), '\r'), str.end());
-    str.push_back('\n');
-    rf_log.info(str);
+  phy->cmd_cell_measure();
+}
+
+std::string enb::get_build_mode()
+{
+  return std::string(srsran_get_build_mode());
+}
+
+std::string enb::get_build_info()
+{
+  if (std::string(srsran_get_build_info()).find("  ") != std::string::npos) {
+    return std::string(srsran_get_version());
+  }
+  return std::string(srsran_get_build_info());
+}
+
+std::string enb::get_build_string()
+{
+  std::stringstream ss;
+  ss << "Built in " << get_build_mode() << " mode using " << get_build_info() << ".";
+  return ss.str();
+}
+
+void enb::toggle_padding()
+{
+  if (!started) {
+    return;
+  }
+  if (eutra_stack) {
+    eutra_stack->toggle_padding();
   }
 }
 
-srslte::LOG_LEVEL_ENUM enb::level(std::string l)
+void enb::tti_clock()
 {
-  boost::to_upper(l);
-  if("NONE" == l){
-    return srslte::LOG_LEVEL_NONE;
-  }else if("ERROR" == l){
-    return srslte::LOG_LEVEL_ERROR;
-  }else if("WARNING" == l){
-    return srslte::LOG_LEVEL_WARNING;
-  }else if("INFO" == l){
-    return srslte::LOG_LEVEL_INFO;
-  }else if("DEBUG" == l){
-    return srslte::LOG_LEVEL_DEBUG;
-  }else{
-    return srslte::LOG_LEVEL_NONE;
+  if (!started) {
+    return;
+  }
+
+  if (_e2_agent) {
+    _e2_agent->tic();
+  }
+
+  if (eutra_stack) {
+    eutra_stack->tti_clock();
+  }
+  if (nr_stack) {
+    nr_stack->tti_clock();
   }
 }
 
