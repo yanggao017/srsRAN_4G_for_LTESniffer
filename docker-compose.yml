@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  srsran-b210:
+    build: .
+    container_name: sigover-fixed
+    privileged: true
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+    volumes:
+      - .:/workspace
+      - /dev/bus/usb:/dev/bus/usb
+    environment:
+      - UHD_IMAGES_DIR=/usr/share/uhd/images
+    working_dir: /workspace/build
+    stdin_open: true
+    tty: true
+    network_mode: "host"
+    cap_add:
+      - SYS_PTRACE
+      - NET_ADMIN
