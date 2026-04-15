@@ -279,30 +279,14 @@ int gen_paging_sysinfmod(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len
   return 0;
 }
 
-/**
- * @brief 生成带 ETWS 指示的 PCCH Paging 消息。
- *
- * Paging 里的 etws-Indication 是一个 presence-only 字段：
- * ASN.1 定义为 ENUMERATED { true } OPTIONAL，消息中只需要把该字段标记为存在，
- * 不携带具体的告警类型、serial number 或 warning text。UE 收到该指示后会重新读取
- * 承载 ETWS 内容的系统消息（如 SIB10/SIB11，具体内容不在 Paging 中承载）。
- *
- * 这里生成的是最小 ETWS Paging：
- * - pagingRecordList 不存在：不是针对某个 IMSI/S-TMSI 的寻呼。
- * - systemInfoModification 不存在：不同时触发普通系统消息变更指示。
- * - etws-Indication 存在：通知 UE 有 ETWS 相关系统消息需要关注。
- * - nonCriticalExtension 不存在：不携带 CMAS/eDRX/UAC 等后续版本扩展字段。
- */
 int gen_paging_etws(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) {
   asn1::bit_ref bref(buffer, buffer_len);
   asn1::rrc::pcch_msg_s pcch_msg;
-
-  // PCCH-MessageType 选择 c1，c1 中当前只有 paging 这个 choice。
   pcch_msg.msg.set_c1();
-
-  // Paging 的几个主字段都是 OPTIONAL/presence-only；只置 ETWS 指示位即可完成编码。
   asn1::rrc::paging_s& paging = pcch_msg.msg.c1().paging();
   paging.etws_ind_present = true;
+  
+
 
   if (pcch_msg.pack(bref) != SRSASN_SUCCESS) {
     return -1;
@@ -539,156 +523,6 @@ int gen_sib2_acbarring(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) 
   std::cout << sib2_json << std::endl;
   *msg_len = len;
   return 0;
-}
-
-// ETWS 示例内容。Paging 只携带 etws-Indication，真正的 ETWS primary/secondary
-// notification 放在 SIB10/SIB11 中，并通过相同 messageIdentifier/serialNumber 关联。
-static const uint16_t ETWS_MSG_ID_EARTHQUAKE_AND_TSUNAMI = 0x1102;
-static const uint16_t ETWS_SERIAL_NUM_DEFAULT             = 0x3000;
-static const uint8_t  ETWS_CBS_PAGE_SIZE                  = 82;
-
-static size_t pack_gsm7_default_alphabet(const char* text, uint8_t* out, size_t out_len)
-{
-  memset(out, 0, out_len);
-
-  const size_t text_len = strlen(text);
-  for (size_t i = 0; i < text_len; ++i) {
-    // 本示例只使用 GSM 7-bit default alphabet 中与 ASCII 编码相同的字符。
-    const uint8_t septet     = static_cast<uint8_t>(text[i]) & 0x7f;
-    const size_t  bit_offset = i * 7;
-    const size_t  byte_idx   = bit_offset / 8;
-    const uint8_t bit_shift  = bit_offset % 8;
-
-    if (byte_idx >= out_len) {
-      break;
-    }
-    out[byte_idx] |= septet << bit_shift;
-    if (bit_shift > 1 && byte_idx + 1 < out_len) {
-      out[byte_idx + 1] |= septet >> (8 - bit_shift);
-    }
-  }
-
-  return (text_len * 7 + 7) / 8;
-}
-
-static void fill_cbs_warning_msg_contents(dyn_octstring& warning_msg_segment, const char* warning_text)
-{
-  uint8_t encoded_page[ETWS_CBS_PAGE_SIZE] = {};
-  size_t  encoded_len = pack_gsm7_default_alphabet(warning_text, encoded_page, sizeof(encoded_page));
-  if (encoded_len > ETWS_CBS_PAGE_SIZE) {
-    encoded_len = ETWS_CBS_PAGE_SIZE;
-  }
-
-  // CBS Warning Message Contents:
-  //   Number-of-Pages(1) + repeated { CBS-Message-Information-Page(82) + CBS-Message-Information-Length(1) }.
-  // 这里构造单页完整消息，因此 Number-of-Pages=1，SIB11 的 segmentType 也设置为 lastSegment。
-  warning_msg_segment.resize(1 + ETWS_CBS_PAGE_SIZE + 1);
-  warning_msg_segment[0] = 1;
-  memcpy(&warning_msg_segment[1], encoded_page, ETWS_CBS_PAGE_SIZE);
-  warning_msg_segment[1 + ETWS_CBS_PAGE_SIZE] = static_cast<uint8_t>(encoded_len);
-}
-
-/**
- * @brief 填充 SIB10：ETWS Primary Notification。
- *
- * SIB10 承载 ETWS 的快速告警信息：
- * - messageIdentifier：告警类别。0x1102 表示 earthquake and tsunami warning。
- * - serialNumber：告警实例编号。UE 用它判断是否是新的/更新的告警。
- * - warningType：2 字节 ETWS warning type。这里使用 earthquake and tsunami，并置 emergency user alert/popup。
- *
- * 注意：SIB10 不承载 warning text，文字内容在 SIB11 的 warningMessageSegment 中。
- */
-static void fill_etws_sib10(sib_type10_s& sib10)
-{
-  sib10.ext           = false;
-  sib10.dummy_present = false;
-  sib10.msg_id.from_number(ETWS_MSG_ID_EARTHQUAKE_AND_TSUNAMI, 16);
-  sib10.serial_num.from_number(ETWS_SERIAL_NUM_DEFAULT, 16);
-  sib10.warning_type.from_number(0x0580);
-}
-
-/**
- * @brief 填充 SIB11：ETWS Secondary Notification。
- *
- * SIB11 承载完整的 ETWS 文字内容。这里构造单分段消息：
- * - warningMessageSegmentType = lastSegment，表示这是最后一段。
- * - warningMessageSegmentNumber = 0，第一段也是唯一一段。
- * - dataCodingScheme = 0x0F，表示按 GSM 7-bit default alphabet 解释该段内容。
- * - warningMessageSegment 按 CBS Warning Message Contents 封装：
- *   Number-of-Pages(1) + CBS-Message-Information-Page(82) + CBS-Message-Information-Length(1)。
- *
- * 若要发送更长文本，可以把 warningMessageSegment 拆成多段：前面的段使用
- * notLastSegment，最后一段使用 lastSegment，并递增 warningMessageSegmentNumber。
- */
-static void fill_etws_sib11(sib_type11_s& sib11)
-{
-  const char* warning_text =
-      "ETWS TEST: EARTHQUAKE AND TSUNAMI WARNING. MOVE TO HIGHER GROUND NOW.";
-
-  sib11.ext                        = false;
-  sib11.data_coding_scheme_present = true;
-  sib11.msg_id.from_number(ETWS_MSG_ID_EARTHQUAKE_AND_TSUNAMI, 16);
-  sib11.serial_num.from_number(ETWS_SERIAL_NUM_DEFAULT, 16);
-  sib11.warning_msg_segment_type = sib_type11_s::warning_msg_segment_type_e_::last_segment;
-  sib11.warning_msg_segment_num  = 0;
-  fill_cbs_warning_msg_contents(sib11.warning_msg_segment, warning_text);
-  sib11.data_coding_scheme.from_number(0x0f);
-}
-
-static int pack_etws_sys_info(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len, bool include_sib10, bool include_sib11)
-{
-  bcch_dl_sch_msg_s bcch_msg;
-  bcch_msg.msg.set_c1();
-
-  sys_info_s&        sys_info = bcch_msg.msg.c1().set_sys_info();
-  sys_info_r8_ies_s& sys_r8   = sys_info.crit_exts.set_sys_info_r8();
-  sys_r8.non_crit_ext_present = false;
-  sys_r8.sib_type_and_info.clear();
-
-  if (include_sib10) {
-    sys_info_r8_ies_s::sib_type_and_info_item_c_ item;
-    sib_type10_s& sib10 = item.set_sib10();
-    fill_etws_sib10(sib10);
-    sys_r8.sib_type_and_info.push_back(item);
-  }
-
-  if (include_sib11) {
-    sys_info_r8_ies_s::sib_type_and_info_item_c_ item;
-    sib_type11_s& sib11 = item.set_sib11();
-    fill_etws_sib11(sib11);
-    sys_r8.sib_type_and_info.push_back(item);
-  }
-
-  asn1::bit_ref bref(buffer, buffer_len);
-  if (bcch_msg.pack(bref) != SRSASN_SUCCESS) {
-    ERROR("Error encoded ETWS system information message");
-    return -1;
-  }
-
-  int len = bref.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
-
-  json_writer js;
-  sys_info.to_json(js);
-  std::cout << js.to_string() << std::endl;
-
-  *msg_len = len;
-  return 0;
-}
-
-int gen_sib10_etws(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
-{
-  return pack_etws_sys_info(buffer, buffer_len, msg_len, true, false);
-}
-
-int gen_sib11_etws(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
-{
-  return pack_etws_sys_info(buffer, buffer_len, msg_len, false, true);
-}
-
-int gen_sib10_sib11_etws(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
-{
-  return pack_etws_sys_info(buffer, buffer_len, msg_len, true, true);
 }
 
 
@@ -1068,3 +902,4 @@ void gen_attach_accept_pdu(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_l
   printf("==== MAC Attach Accept PDU (%d bytes) ====\n", len);
   hexdump(ptr, len);
 }
+

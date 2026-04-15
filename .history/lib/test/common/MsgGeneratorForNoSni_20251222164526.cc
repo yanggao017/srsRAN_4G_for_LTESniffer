@@ -506,8 +506,8 @@ void MsgGeneratorForNoSni::gen_rrc_connection_release_pdu(uint8_t* buffer, uint3
   
   if (!build_dl_mac_pdu_from_rrc(
     std::move(rrc_pdu),
-    9,   // pdcp_sn
-    9,  // rlc_sn
+    6,   // pdcp_sn
+    6,  // rlc_sn
     5,   // pdcp_sn_len_bits
     buffer,
     msg_len)) {

