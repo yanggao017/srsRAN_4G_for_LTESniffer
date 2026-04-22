@@ -329,7 +329,111 @@ void load_msg_buffer(uint32_t pci, inject_msg_t& msg)
          peak_amp);
 }
 
-void prepare_inject_msgs(uint32_t pci)
+void build_paging_sib2_composite(uint32_t samples_per_subframe)
+{
+  if (g_inject_msgs.size() != 2) {
+    throw std::runtime_error("paging_sib2 expects exactly two source waveforms");
+  }
+
+  inject_msg_t& paging_msg = g_inject_msgs[0];
+  inject_msg_t& sib2_msg   = g_inject_msgs[1];
+
+  if (paging_msg.buffer == nullptr || sib2_msg.buffer == nullptr) {
+    throw std::runtime_error("paging_sib2 source waveform is empty");
+  }
+
+  uint32_t edge_zeros = samples_per_subframe / 10;
+  if (paging_msg.nof_samples <= edge_zeros || sib2_msg.nof_samples <= edge_zeros) {
+    throw std::runtime_error("paging_sib2 source waveform too short for edge trimming");
+  }
+
+  uint32_t paging_trimmed_len = paging_msg.nof_samples - edge_zeros;
+  uint32_t sib2_trimmed_len   = sib2_msg.nof_samples - edge_zeros;
+  uint32_t total_samples      = paging_trimmed_len + sib2_trimmed_len;
+  cf_t*    composite     = srsran_vec_cf_malloc(total_samples);
+  if (composite == nullptr) {
+    throw std::runtime_error("failed to allocate paging_sib2 composite buffer");
+  }
+  srsran_vec_cf_zero(composite, total_samples);
+
+  memcpy(composite, paging_msg.buffer, paging_trimmed_len * sizeof(cf_t));
+  memcpy(composite + paging_trimmed_len, sib2_msg.buffer + edge_zeros, sib2_trimmed_len * sizeof(cf_t));
+
+  free(paging_msg.buffer);
+  free(sib2_msg.buffer);
+  paging_msg.buffer = nullptr;
+  sib2_msg.buffer   = nullptr;
+
+  inject_msg_t composite_msg = {};
+  composite_msg.mode_name    = "paging_sib2";
+  composite_msg.file_name    = "paging_sib2_sf9_sf0.fc32";
+  composite_msg.subframe     = 9;
+  composite_msg.buffer       = composite;
+  composite_msg.rf_buffers[0] = composite;
+  composite_msg.nof_samples  = total_samples;
+
+  g_inject_msgs.clear();
+  g_inject_msgs.push_back(composite_msg);
+
+  printf("[inject] built paging_sib2 composite with %u samples (trim_tail=%u trim_head=%u)\n",
+         total_samples,
+         edge_zeros,
+         edge_zeros);
+}
+
+void build_paging_sib1_composite(uint32_t samples_per_subframe)
+{
+  if (g_inject_msgs.size() != 2) {
+    throw std::runtime_error("paging_sib1 expects exactly two source waveforms");
+  }
+
+  inject_msg_t& paging_msg = g_inject_msgs[0];
+  inject_msg_t& sib1_msg   = g_inject_msgs[1];
+
+  if (paging_msg.buffer == nullptr || sib1_msg.buffer == nullptr) {
+    throw std::runtime_error("paging_sib1 source waveform is empty");
+  }
+
+  uint32_t edge_zeros = samples_per_subframe / 10;
+  uint32_t paging_offset = 4 * samples_per_subframe - 2 * edge_zeros;
+  if (paging_offset < sib1_msg.nof_samples - edge_zeros) {
+    throw std::runtime_error("paging_sib1 paging offset is smaller than trimmed sib1 waveform length");
+  }
+
+  uint32_t total_samples = paging_offset + (paging_msg.nof_samples - edge_zeros);
+  cf_t*    composite     = srsran_vec_cf_malloc(total_samples);
+  if (composite == nullptr) {
+    throw std::runtime_error("failed to allocate paging_sib1 composite buffer");
+  }
+  srsran_vec_cf_zero(composite, total_samples);
+
+  memcpy(composite, sib1_msg.buffer, (sib1_msg.nof_samples - edge_zeros) * sizeof(cf_t));
+  memcpy(composite + paging_offset, paging_msg.buffer + edge_zeros, (paging_msg.nof_samples - edge_zeros) * sizeof(cf_t));
+
+  free(paging_msg.buffer);
+  free(sib1_msg.buffer);
+  paging_msg.buffer = nullptr;
+  sib1_msg.buffer   = nullptr;
+
+  inject_msg_t composite_msg = {};
+  composite_msg.mode_name     = "paging_sib1";
+  composite_msg.file_name     = "paging_sib1_sf5_gap_sf9.fc32";
+  composite_msg.subframe      = 5;
+  composite_msg.buffer        = composite;
+  composite_msg.rf_buffers[0] = composite;
+  composite_msg.nof_samples   = total_samples;
+
+  g_inject_msgs.clear();
+  g_inject_msgs.push_back(composite_msg);
+
+  printf("[inject] built paging_sib1 composite with %u samples (offset=%u trim_head=%u trim_tail=%u)\n",
+         total_samples,
+         paging_offset,
+         edge_zeros,
+         edge_zeros);
+}
+
+void prepare_inject_msgs(uint32_t pci, uint32_t samples_per_subframe)
 {
   g_inject_msgs.clear();
 
@@ -345,6 +449,12 @@ void prepare_inject_msgs(uint32_t pci)
 
   for (auto& msg : g_inject_msgs) {
     load_msg_buffer(pci, msg);
+  }
+
+  if (g_args.inject_type == "paging_sib1") {
+    build_paging_sib1_composite(samples_per_subframe);
+  } else if (g_args.inject_type == "paging_sib2") {
+    build_paging_sib2_composite(samples_per_subframe);
   }
 }
 
@@ -530,7 +640,7 @@ tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
   }
 
   printf("[sync] waiting for first trigger at %.2f Msps for PCI=%u, PRB=%u\n", srate / 1e6, cell.id, cell.nof_prb);
-  prepare_inject_msgs(cell.id);
+  prepare_inject_msgs(cell.id, (uint32_t)(srate / 1000));
 
   while (!g_go_exit && !trigger.valid) {
     cf_t*              sf_ptrs[SRSRAN_MAX_CHANNELS] = {};
@@ -569,11 +679,12 @@ tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
     trigger.valid      = true;
     trigger.target_sfn = mib_sfn;
     trigger.tx_time    = rx_ts;
+    srsran_timestamp_sub(&trigger.tx_time, 0, g_args.tx_advance_us * 1e-6);
 
     for (auto& msg : g_inject_msgs) {
       msg.target_sfn = mib_sfn;
-      msg.tx_time    = rx_ts;
-      srsran_timestamp_add(&msg.tx_time, 0, 0.020 + msg.subframe * 0.001 - g_args.tx_advance_us * 1e-6);
+      msg.tx_time    = trigger.tx_time;
+      srsran_timestamp_add(&msg.tx_time, 0, 0.020 + msg.subframe * 0.001);
       printf("[trigger] %s target_sfn=%u target_sf=%u time=%.6f s tx_advance=%.3f us\n",
              msg.file_name.c_str(),
              msg.target_sfn,

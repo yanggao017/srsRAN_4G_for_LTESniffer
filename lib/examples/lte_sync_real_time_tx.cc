@@ -24,6 +24,7 @@ extern "C" {
 #include <stdexcept>
 #include <sys/stat.h>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -52,8 +53,14 @@ prog_args_t                           g_args;
 std::shared_ptr<srsran::radio>        g_radio;
 volatile sig_atomic_t                 g_go_exit = 0;
 const char*                           g_cache_root = "./cache";
-cf_t*                                 g_paging_buffer[SRSRAN_MAX_CHANNELS] = {};
-uint32_t                              g_paging_nof_samples = 0;
+struct inject_msg_t {
+  std::string        mode_name = "";
+  std::string        file_name = "";
+  uint32_t           subframe  = 0;
+  cf_t*              buffer[SRSRAN_MAX_CHANNELS] = {};
+  uint32_t           nof_samples = 0;
+};
+std::vector<inject_msg_t>             g_inject_msgs;
 cell_search_cfg_t                     g_cell_search_cfg = {
     .max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
     .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
@@ -73,7 +80,7 @@ void usage(const char* prog)
   printf("  -A Number of RX antennas [default %u]\n", g_args.nof_antennas);
   printf("  -n Number of synchronized subframes to print [default unlimited]\n");
   printf("  -l Force N_id_2 during search [default best]\n");
-  printf("  -m Injection type [supported: paging_imsi]\n");
+  printf("  -m Injection type [supported: paging_imsi, paging_sib1, paging_sib2]\n");
   printf("  -G Enable AGC\n");
   printf("  -Q Use standard LTE sample rates\n");
   printf("  -v Increase verbose level\n");
@@ -231,70 +238,98 @@ char* find_cell_dir(uint32_t pci)
   return found_path;
 }
 
-void load_paging_buffer(uint32_t pci, uint32_t nof_samples)
+void load_inject_buffer(uint32_t pci, inject_msg_t& msg, uint32_t nof_samples)
 {
   char* cell_dir = nullptr;
   char* file_path = nullptr;
   FILE* fp = nullptr;
   size_t count = 0;
 
-  if (g_args.inject_type != "paging_imsi") {
-    return;
-  }
-
   cell_dir = find_cell_dir(pci);
   if (cell_dir == nullptr) {
-    throw std::runtime_error("failed to find cell cache directory for paging injection");
+    throw std::runtime_error("failed to find cell cache directory for injection");
   }
 
-  file_path = path_join(cell_dir, "paging_imsi_sf9.fc32");
+  file_path = path_join(cell_dir, msg.file_name.c_str());
   free(cell_dir);
   if (file_path == nullptr) {
-    throw std::runtime_error("failed to build paging file path");
+    throw std::runtime_error("failed to build inject file path");
   }
 
-  g_paging_buffer[0] = srsran_vec_cf_malloc(nof_samples);
-  if (g_paging_buffer[0] == nullptr) {
+  msg.buffer[0] = srsran_vec_cf_malloc(nof_samples);
+  if (msg.buffer[0] == nullptr) {
     free(file_path);
-    throw std::runtime_error("failed to allocate paging buffer");
+    throw std::runtime_error("failed to allocate inject buffer");
   }
-  srsran_vec_cf_zero(g_paging_buffer[0], nof_samples);
+  srsran_vec_cf_zero(msg.buffer[0], nof_samples);
 
   fp = fopen(file_path, "rb");
   free(file_path);
   if (fp == nullptr) {
-    throw std::runtime_error("failed to open paging file");
+    throw std::runtime_error("failed to open inject file");
   }
 
-  count = fread(g_paging_buffer[0], sizeof(cf_t), nof_samples, fp);
+  count = fread(msg.buffer[0], sizeof(cf_t), nof_samples, fp);
   fclose(fp);
   if (count == 0) {
-    throw std::runtime_error("paging file is empty");
+    throw std::runtime_error("inject file is empty");
   }
-  g_paging_nof_samples = nof_samples;
-  printf("[inject] loaded paging_imsi_sf9.fc32 with %zu samples\n", count);
+  msg.nof_samples = (uint32_t)count;
+  printf("[inject] loaded %s with %zu samples\n", msg.file_name.c_str(), count);
 }
 
-void maybe_send_paging(uint32_t cur_sfn, const srsran_timestamp_t& cur_time, uint32_t cur_sf_idx)
+void prepare_inject_msgs(uint32_t pci, uint32_t nof_samples)
 {
-  srsran_timestamp_t tx_time = cur_time;
-  srsran::rf_buffer_t tx_buffer(g_paging_buffer, g_paging_nof_samples);
-  srsran::rf_timestamp_t tx_timestamp = {};
-  uint32_t target_sfn = cur_sfn;
+  g_inject_msgs.clear();
 
-  if (g_paging_buffer[0] == nullptr || g_args.inject_type != "paging_imsi") {
+  if (g_args.inject_type == "paging_imsi") {
+    g_inject_msgs.push_back({"paging_imsi", "paging_imsi_sf9.fc32", 9, {}, 0});
+  } else if (g_args.inject_type == "paging_sib1") {
+    g_inject_msgs.push_back({"paging_sib1", "paging_sysinfmod_sf9.fc32", 9, {}, 0});
+    g_inject_msgs.push_back({"paging_sib1", "sib1_tac_sf5.fc32", 5, {}, 0});
+  } else if (g_args.inject_type == "paging_sib2") {
+    g_inject_msgs.push_back({"paging_sib2", "paging_sysinfmod_sf9.fc32", 9, {}, 0});
+    g_inject_msgs.push_back({"paging_sib2", "sib2_acbarring_sf0.fc32", 0, {}, 0});
+  }
+
+  for (auto& msg : g_inject_msgs) {
+    load_inject_buffer(pci, msg, nof_samples);
+  }
+}
+
+void maybe_send_inject_msgs(uint32_t cur_sfn, const srsran_timestamp_t& cur_time, uint32_t cur_sf_idx)
+{
+  if (g_inject_msgs.empty()) {
     return;
   }
 
-  srsran_timestamp_add(&tx_time, 0, (9 - cur_sf_idx) * 0.001 - g_args.tx_advance_us * 1e-6);
-  *tx_timestamp.get_ptr(0) = tx_time;
+  std::vector<inject_msg_t*> ordered;
+  ordered.reserve(g_inject_msgs.size());
+  for (auto& msg : g_inject_msgs) {
+    ordered.push_back(&msg);
+  }
 
-  printf("paging_imsi [Subframe 9] [future_time] next_sfn: %u time: %.6f s tx_advance: %.3f us\n",
-         target_sfn,
-         (double)tx_time.full_secs + tx_time.frac_secs,
-         g_args.tx_advance_us);
-  if (!g_radio->tx(tx_buffer, tx_timestamp)) {
-    printf("[inject] paging timed tx failed\n");
+  std::sort(ordered.begin(), ordered.end(), [](const inject_msg_t* a, const inject_msg_t* b) {
+    return a->subframe < b->subframe;
+  });
+
+  for (inject_msg_t* msg : ordered) {
+    srsran_timestamp_t   tx_time = cur_time;
+    srsran::rf_buffer_t  tx_buffer(msg->buffer, msg->nof_samples);
+    srsran::rf_timestamp_t tx_timestamp = {};
+
+    srsran_timestamp_add(&tx_time, 0, (msg->subframe + 10 - cur_sf_idx) * 0.001 - g_args.tx_advance_us * 1e-6);
+    *tx_timestamp.get_ptr(0) = tx_time;
+
+    printf("%s [Subframe %u] [future_time] next_sfn: %u time: %.6f s tx_advance: %.3f us\n",
+           msg->file_name.c_str(),
+           msg->subframe,
+           (cur_sfn + 1) % 1024,
+           (double)tx_time.full_secs + tx_time.frac_secs,
+           g_args.tx_advance_us);
+    if (!g_radio->tx(tx_buffer, tx_timestamp)) {
+      printf("[inject] timed tx failed for %s\n", msg->file_name.c_str());
+    }
   }
 }
 
@@ -481,9 +516,7 @@ void run_sync_loop(srsran_cell_t cell, float search_cell_cfo)
   }
 
   printf("[sync] starting LTE sync loop at %.2f Msps for PCI=%u, PRB=%u\n", srate / 1e6, cell.id, cell.nof_prb);
-  if (g_args.inject_type == "paging_imsi") {
-    load_paging_buffer(cell.id, SRSRAN_SF_LEN_PRB(cell.nof_prb));
-  }
+  prepare_inject_msgs(cell.id, SRSRAN_SF_LEN_PRB(cell.nof_prb));
   while (!g_go_exit && (g_args.nof_subframes < 0 || (int)printed < g_args.nof_subframes)) {
     cf_t*             sf_ptrs[SRSRAN_MAX_CHANNELS] = {};
     srsran_timestamp_t rx_ts = {};
@@ -506,7 +539,7 @@ void run_sync_loop(srsran_cell_t cell, float search_cell_cfo)
         srsran_pbch_mib_unpack(bch_payload, &cell, &mib_sfn);
         mib_sfn = (mib_sfn + (uint32_t)sfn_offset) % 1024;
         mib_valid = true;
-        maybe_send_paging(mib_sfn, rx_ts, srsran_ue_sync_get_sfidx(&ue_sync));
+        maybe_send_inject_msgs(mib_sfn, rx_ts, srsran_ue_sync_get_sfidx(&ue_sync));
       }
     }
 
@@ -520,10 +553,13 @@ void run_sync_loop(srsran_cell_t cell, float search_cell_cfo)
   }
 
   srsran_ue_mib_free(&ue_mib);
-  if (g_paging_buffer[0] != nullptr) {
-    free(g_paging_buffer[0]);
-    g_paging_buffer[0] = nullptr;
+  for (auto& msg : g_inject_msgs) {
+    if (msg.buffer[0] != nullptr) {
+      free(msg.buffer[0]);
+      msg.buffer[0] = nullptr;
+    }
   }
+  g_inject_msgs.clear();
   free(sf_buffer[0]);
   srsran_ue_sync_free(&ue_sync);
 }
