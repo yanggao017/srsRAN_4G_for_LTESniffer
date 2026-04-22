@@ -388,7 +388,7 @@ void build_paging_sib2_composite(uint32_t samples_per_subframe)
          edge_zeros,
          edge_zeros);
 }
-[[maybe_unused]]
+
 void build_paging_sib1_composite(uint32_t samples_per_subframe)
 {
   if (g_inject_msgs.size() != 2) {

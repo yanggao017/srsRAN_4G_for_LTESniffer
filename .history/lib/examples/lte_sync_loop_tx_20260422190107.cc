@@ -388,7 +388,7 @@ void build_paging_sib2_composite(uint32_t samples_per_subframe)
          edge_zeros,
          edge_zeros);
 }
-[[maybe_unused]]
+
 void build_paging_sib1_composite(uint32_t samples_per_subframe)
 {
   if (g_inject_msgs.size() != 2) {
@@ -460,7 +460,7 @@ void prepare_inject_msgs(uint32_t pci, uint32_t samples_per_subframe)
   }
 
   if (g_args.inject_type == "paging_sib1") {
-    //build_paging_sib1_composite(samples_per_subframe);
+    build_paging_sib1_composite(samples_per_subframe);
   } else if (g_args.inject_type == "paging_sib2") {
     build_paging_sib2_composite(samples_per_subframe);
   }
