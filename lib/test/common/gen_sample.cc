@@ -96,6 +96,33 @@ const AttackTypeInfo attack_types[ATTACK_TYPE_COUNT] = {
   {"dea_eps_bea_con_request","DEA EPS Bearer Context Request Message Generation"}
 
 };
+
+const char* get_attack_type_name_safe(int type)
+{
+  if (type >= 0 && type < ATTACK_TYPE_COUNT) {
+    return attack_types[type].name;
+  }
+  return "unknown";
+}
+
+void print_generation_banner(const char* extra = nullptr)
+{
+  printf("[gen] type=%s sf=%u rnti=0x%x", get_attack_type_name_safe(attack_type), tti, rnti);
+  if (extra != nullptr && extra[0] != '\0') {
+    printf(" %s", extra);
+  }
+  printf("\n");
+}
+
+void print_payload_hex(const uint8_t* data, uint32_t len)
+{
+  printf("[msg] hex=");
+  for (uint32_t i = 0; i < len; ++i) {
+    printf("%02x", data[i]);
+  }
+  printf("\n");
+}
+
 void usage(const char *prog) {
   printf("Usage: %s [options]\n", prog);
   printf("Options:\n");
@@ -261,11 +288,7 @@ int main(int argc, char** argv) {
       return -1;
   }
   generate_message(payload, &payload_len, argv[0]);
-  printf("[PAYLOAD_HEX] ");
-  for (uint32_t i = 0; i < payload_len; ++i) {
-    printf("%02x", payload[0][i]);
-  }
-  printf("\n");
+  print_payload_hex(payload[0], payload_len);
   /*if (write_pcap) {
     write_dl_pcap(enb_dl, tti, rnti, attack_types[attack_type].name);
   }*/
@@ -334,7 +357,7 @@ int main(int argc, char** argv) {
   memcpy(temp_buffer[0] + zero_padding_len + signal_length, zero_buff, zero_padding_len * sizeof(cf_t));
   fwrite(temp_buffer[0], (SRSRAN_SF_LEN_MAX + zero_padding_len *2) * sizeof(cf_t), 1, fp);
   fclose(fp);
-  printf("[OK] Generate target msg signal file: %s\n", outputfile);
+  printf("[ok] generated %s\n", outputfile);
 
   srsran_enb_dl_free(enb_dl);
   for (uint32_t i = 0; i < cell.nof_ports; i++) {
@@ -365,37 +388,37 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
     case PAGING_SYSINFOMOD:
       rnti = SRSRAN_PRNTI;
       tti = 9;
-      printf("\n[RUN] Start to generate Paging Systeminfomodification msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_paging_sysinfmod(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case PAGING_ETWS:
       rnti = SRSRAN_PRNTI;
       tti = 9;
-      printf("\n[RUN] Start to generate Paging ETWS indication msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_paging_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case SIB1_ETWS_SCHED:
       rnti = SRSRAN_SIRNTI;
       tti = 5;
-      printf("\n[RUN] Start to generate SIB1 ETWS scheduling msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib1_etws_sched(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case SIB10_ETWS:
       rnti = SRSRAN_SIRNTI;
       tti = 1;
-      printf("\n[RUN] Start to generate SIB10 ETWS primary notification to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib10_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case SIB11_ETWS:
       rnti = SRSRAN_SIRNTI;
       tti = 1;
-      printf("\n[RUN] Start to generate SIB11 ETWS secondary notification to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib11_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case SIB10_SIB11_ETWS:
       rnti = SRSRAN_SIRNTI;
       tti = 2;
-      printf("\n[RUN] Start to generate complete SIB10/SIB11 ETWS content to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib10_sib11_etws(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case PAGING_IMSI: {
@@ -403,72 +426,77 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
       tti = 9;
       uint8_t imsi_buff[100] = {0};
       uint32_t imsi_len = imsi_to_array(imsi, imsi_buff);
-      printf("IMSI is %s. Handling specific case.\n", imsi.c_str());
-      printf("[RUN] Start to generate Paging IMSI msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      char extra[128] = {};
+      snprintf(extra, sizeof(extra), "imsi=%s", imsi.c_str());
+      print_generation_banner(extra);
       gen_paging_imsi(payload[0], sizeof(uint8_t) * 2048, payload_len, imsi_buff, imsi_len);
       break;
     }
     case SIB1_SYSINFOVALUETAG:
       rnti = SRSRAN_SIRNTI;
       tti = 5;
-      printf("\n[RUN] Start to generate SIB1 Systeminfovaluetag msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib1_sysinfvaltag(payload[0], sizeof(uint8_t) * 2048, payload_len, sys_info_value_tag);
       break;
 
     case SIB1_TAC:
       rnti = SRSRAN_SIRNTI;
       tti = 5;
-      printf("\n[RUN] Start to generate SIB1 TAC msg to subframe %d with rnti = 0x%x tac = %d.\n", tti, rnti, tac);
+      {
+        char extra[64] = {};
+        snprintf(extra, sizeof(extra), "tac=%d", tac);
+        print_generation_banner(extra);
+      }
       gen_sib1_tac(payload[0], sizeof(uint8_t) * 2048, payload_len, tac);
       break;
 
     case SIB2_ACBARRING:
       rnti = SRSRAN_SIRNTI;
       tti = 0;
-      printf("\n[RUN] Start to generate SIB2 ACBarring msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib2_acbarring(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
 
     case RAR:
-      printf("\n[RUN] Start to generate RAR msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_rar_pdu(preamble, payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
 
     case SIB1_ORIGINAL:
       rnti = SRSRAN_SIRNTI;
       tti = 5;
-      printf("\n[RUN] Start to generate SIB1 original msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_sib1_original(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
 
     case ATTACH_REJECT:
-      printf("\n[RUN] Start to generate Attach Reject msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_attach_reject_pdu_v1(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case IDENTITY_REQUEST:
-      printf("\n[RUN] Start to generate Identity Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_identity_request(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case ATTACH_ACCEPT:
-      printf("\n[RUN] Start to generate Attach Accept msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       gen_attach_accept_pdu(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
     case DETACH_REQUEST:
-      printf("\n[RUN] Start to generate Detach Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       Msggen.gen_detach_request_pdu(payload[0], payload_len);
       break;
     case PDCCH_ORDER:
-      printf("\n[RUN] Start to generate PDCCH Order msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       is_pdcch_order = true;
       gen_paging_sysinfmod(payload[0], sizeof(uint8_t) * 2048, payload_len);
       //Msggen.gen_pdcch_order_pdu(payload[0], payload_len, preamble);
       break;
     case RRC_CONNECTION_RELEASE:
-      printf("\n[RUN] Start to generate RRC Connection Release msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       Msggen.gen_rrc_connection_release_pdu(payload[0], payload_len);
       break;
     case DEA_EPS_BEA_CON_REQUEST:
-      printf("\n[RUN] Start to generate DEA EPS Bearer Context Request msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
+      print_generation_banner();
       Msggen.gen_deactivate_eps_bearer_request_pdu(payload[0], payload_len);
       break;
     default:
@@ -590,14 +618,15 @@ int read_cell_config_from_json() {
       std::cerr << "[ERROR] Type error in JSON: " << e.what() << "\n";
       return -1;
   }
-  std::cout << "[OK] Successfully loaded cell config:\n";
-  std::cout << "   Type: " << (cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD") << "\n";
-  std::cout << "   PCI: " << cell.id << "\n";
-  std::cout << "   PRB: " << cell.nof_prb << "\n";
-  std::cout << "   Ports: " << cell.nof_ports << "\n";
-  std::cout << "   CP: " << (cell.cp == SRSRAN_CP_NORM ? "Normal" : "Extended") << "\n";
-  std::cout << "   PHICH Length: " << (cell.phich_length == SRSRAN_PHICH_NORM ? "normal" : "extended") << "\n";
-  std::cout << "   PHICH Resources: " << cell.phich_resources << "\n";
+  std::cout << "[ok] loaded cell config:"
+            << " pci=" << cell.id
+            << " prb=" << cell.nof_prb
+            << " ports=" << cell.nof_ports
+            << " type=" << (cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD")
+            << " cp=" << (cell.cp == SRSRAN_CP_NORM ? "Normal" : "Extended")
+            << " phich_len=" << (cell.phich_length == SRSRAN_PHICH_NORM ? "normal" : "extended")
+            << " phich_res=" << cell.phich_resources
+            << "\n";
   return 0;
 }
 

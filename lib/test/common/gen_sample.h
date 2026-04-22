@@ -199,6 +199,25 @@ int print_sib2_fields(const sib_type2_s& verified_data) {
   return 1;
 }
 
+void print_sib1_modified_fields(const char* mode, const char* fields)
+{
+  printf("[sib1] mode=%s %s\n", mode, fields);
+}
+
+void print_sib2_modified_fields(const sib_type2_s& sib2)
+{
+  printf("[sib2] ac_barr_info_present=%s emergency=%s mo_sig={factor=%s,time=%s,special_ac=%s} "
+         "mo_data={factor=%s,time=%s,special_ac=%s}\n",
+         sib2.ac_barr_info_present ? "true" : "false",
+         sib2.ac_barr_info.ac_barr_for_emergency ? "true" : "false",
+         sib2.ac_barr_info.ac_barr_for_mo_sig.ac_barr_factor.to_string(),
+         sib2.ac_barr_info.ac_barr_for_mo_sig.ac_barr_time.to_string(),
+         sib2.ac_barr_info.ac_barr_for_mo_sig.ac_barr_for_special_ac.to_string().c_str(),
+         sib2.ac_barr_info.ac_barr_for_mo_data.ac_barr_factor.to_string(),
+         sib2.ac_barr_info.ac_barr_for_mo_data.ac_barr_time.to_string(),
+         sib2.ac_barr_info.ac_barr_for_mo_data.ac_barr_for_special_ac.to_string().c_str());
+}
+
 /**
  * @brief 从纯十六进制文本文件读取内容，转换为字节数组
  * @param filename 输入文件路径，如 "../output/sib2.hex"
@@ -426,7 +445,7 @@ int gen_sib1_sysinfvaltag(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_le
     return -1;
   }
   int len = bref_ret.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  print_sib1_modified_fields("sysinfovaltag", ("sys_info_value_tag=" + std::to_string(sys_info_value_tag)).c_str());
   *msg_len = len;
   return 0;
 }
@@ -459,12 +478,7 @@ int gen_sib1_tac(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len, int ta
     return -1;
   }
   int len = bref_ret.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
-  json_writer js;
-  static std::string sib1_json;
-  data.to_json(js);
-  sib1_json = js.to_string();
-  std::cout << sib1_json << std::endl;
+  print_sib1_modified_fields("tac", ("tac=" + std::to_string(tac)).c_str());
   *msg_len = len;
   return 0;
 }
@@ -557,13 +571,9 @@ int gen_sib1_etws_sched(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
   }
 
   int len = bref_ret.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
-
-  json_writer js;
-  static std::string sib1_json;
-  sib1.to_json(js);
-  sib1_json = js.to_string();
-  std::cout << sib1_json << std::endl;
+  print_sib1_modified_fields("etws_sched",
+                             "si_win_len=ms40 sys_info_value_tag=1 sched_info[0]=sib3/rf16 "
+                             "sched_info[1]=sib10+sib11/rf16");
 
   *msg_len = len;
   return 0;
@@ -580,7 +590,6 @@ int gen_sib2_acbarring(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) 
       free(rrc_msg);
       return -1;
   }
-  srsran_vec_fprint_byte(stdout, rrc_msg, rrc_msg_len);  
 
   cbit_ref bref(&rrc_msg[0], rrc_msg_len);
   bcch_dl_sch_msg_s bcch_msg;
@@ -604,12 +613,7 @@ int gen_sib2_acbarring(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) 
     return -1;
   }
   int len = bref_ret.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);  
-  json_writer js;
-  static std::string sib2_json;
-  sib2->to_json(js);
-  sib2_json = js.to_string();
-  std::cout << sib2_json << std::endl;
+  print_sib2_modified_fields(*sib2);
   *msg_len = len;
   return 0;
 }

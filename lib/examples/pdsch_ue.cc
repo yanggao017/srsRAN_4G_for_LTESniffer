@@ -948,7 +948,7 @@ int main(int argc, char** argv)
 #endif
 
   printf("\nBye\n");
-  exit(0);
+  return 0;
 }
 using namespace asn1;
 using namespace asn1::rrc;
@@ -1043,7 +1043,8 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
           save_to_output("sib1.hex", sib1_hex);
           save_to_output("sib2.hex", sib2_hex);
           sibs_completed = true;
-          exit(0); // 成功获取全部，退出
+          go_exit = true;
+          return;
         }
       }
     }
