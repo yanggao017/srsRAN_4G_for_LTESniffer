@@ -21,7 +21,6 @@ extern "C" {
 #include <cstring>
 #include <dirent.h>
 #include <getopt.h>
-#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -62,7 +61,6 @@ struct inject_msg_t {
   std::string        file_name  = "";
   uint32_t           subframe   = 0;
   cf_t*              buffer     = nullptr;
-  cf_t*              rf_buffers[SRSRAN_MAX_CHANNELS] = {};
   uint32_t           nof_samples = 0;
   uint32_t           target_sfn = 0;
   srsran_timestamp_t tx_time    = {};
@@ -250,14 +248,12 @@ char* find_cell_dir(uint32_t pci)
   return found_path;
 }
 
-void load_msg_buffer(uint32_t pci, inject_msg_t& msg)
+void load_msg_buffer(uint32_t pci, inject_msg_t& msg, uint32_t nof_samples)
 {
   char*  cell_dir  = nullptr;
   char*  file_path = nullptr;
   FILE*  fp        = nullptr;
   size_t count     = 0;
-  long   file_size = 0;
-  size_t nof_samples = 0;
   int    first_nonzero = -1;
   float  peak_amp      = 0.0f;
 
@@ -272,43 +268,26 @@ void load_msg_buffer(uint32_t pci, inject_msg_t& msg)
     throw std::runtime_error("failed to build inject file path");
   }
 
-  fp = fopen(file_path, "rb");
-  if (fp == nullptr) {
-    free(file_path);
-    throw std::runtime_error("failed to open inject file");
-  }
-
-  if (fseek(fp, 0, SEEK_END) != 0) {
-    fclose(fp);
-    free(file_path);
-    throw std::runtime_error("failed to seek inject file");
-  }
-  file_size = ftell(fp);
-  if (file_size <= 0 || (file_size % (long)sizeof(cf_t)) != 0) {
-    fclose(fp);
-    free(file_path);
-    throw std::runtime_error("inject file size is invalid");
-  }
-  rewind(fp);
-
-  nof_samples = (size_t)file_size / sizeof(cf_t);
-  msg.buffer = srsran_vec_cf_malloc((uint32_t)nof_samples);
+  msg.buffer = srsran_vec_cf_malloc(nof_samples);
   if (msg.buffer == nullptr) {
-    fclose(fp);
     free(file_path);
     throw std::runtime_error("failed to allocate inject buffer");
   }
-  srsran_vec_cf_zero(msg.buffer, (uint32_t)nof_samples);
+  srsran_vec_cf_zero(msg.buffer, nof_samples);
+
+  fp = fopen(file_path, "rb");
+  free(file_path);
+  if (fp == nullptr) {
+    throw std::runtime_error("failed to open inject file");
+  }
 
   count = fread(msg.buffer, sizeof(cf_t), nof_samples, fp);
   fclose(fp);
-  free(file_path);
   if (count == 0) {
     throw std::runtime_error("inject file is empty");
   }
 
-  msg.nof_samples = (uint32_t)count;
-  msg.rf_buffers[0] = msg.buffer;
+  msg.nof_samples = nof_samples;
   for (size_t i = 0; i < count; ++i) {
     float i_part = __real__ msg.buffer[i];
     float q_part = __imag__ msg.buffer[i];
@@ -329,7 +308,7 @@ void load_msg_buffer(uint32_t pci, inject_msg_t& msg)
          peak_amp);
 }
 
-void prepare_inject_msgs(uint32_t pci)
+void prepare_inject_msgs(uint32_t pci, uint32_t nof_samples)
 {
   g_inject_msgs.clear();
 
@@ -341,7 +320,7 @@ void prepare_inject_msgs(uint32_t pci)
   }
 
   for (auto& msg : g_inject_msgs) {
-    load_msg_buffer(pci, msg);
+    load_msg_buffer(pci, msg, nof_samples);
   }
 }
 
@@ -527,7 +506,7 @@ tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
   }
 
   printf("[sync] waiting for first trigger at %.2f Msps for PCI=%u, PRB=%u\n", srate / 1e6, cell.id, cell.nof_prb);
-  prepare_inject_msgs(cell.id);
+  prepare_inject_msgs(cell.id, SRSRAN_SF_LEN_PRB(cell.nof_prb));
 
   while (!g_go_exit && !trigger.valid) {
     cf_t*              sf_ptrs[SRSRAN_MAX_CHANNELS] = {};
@@ -570,7 +549,7 @@ tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
     for (auto& msg : g_inject_msgs) {
       msg.target_sfn = mib_sfn;
       msg.tx_time    = rx_ts;
-      srsran_timestamp_add(&msg.tx_time, 0, 0.020 + msg.subframe * 0.001 - g_args.tx_advance_us * 1e-6);
+      srsran_timestamp_add(&msg.tx_time, 0, msg.subframe * 0.001 - g_args.tx_advance_us * 1e-6);
       printf("[trigger] %s target_sfn=%u target_sf=%u time=%.6f s tx_advance=%.3f us\n",
              msg.file_name.c_str(),
              msg.target_sfn,
@@ -590,21 +569,16 @@ void run_loop_tx(tx_trigger_t trigger)
 {
   uint32_t               sent         = 0;
 
-  printf("[tx-loop] g_inject_msgs.size()=%zu\n", g_inject_msgs.size());
 
   while (!g_go_exit && (g_args.nof_subframes < 0 || (int)sent < g_args.nof_subframes)) {
-    std::sort(g_inject_msgs.begin(), g_inject_msgs.end(), [](const inject_msg_t& a, const inject_msg_t& b) {
-      if (a.tx_time.full_secs != b.tx_time.full_secs) {
-        return a.tx_time.full_secs < b.tx_time.full_secs;
-      }
-      return a.tx_time.frac_secs < b.tx_time.frac_secs;
-    });
-
     for (auto& msg : g_inject_msgs) {
-      srsran::rf_buffer_t    tx_buffer(msg.rf_buffers, msg.nof_samples);
+      cf_t*                 tx_buffers[SRSRAN_MAX_CHANNELS] = {};
+      srsran::rf_buffer_t   tx_buffer(tx_buffers, msg.nof_samples);
       srsran::rf_timestamp_t tx_timestamp = {};
 
+      tx_buffers[0] = msg.buffer;
       *tx_timestamp.get_ptr(0) = msg.tx_time;
+      printf("[tx-loop] g_inject_msgs.size()=%zu\n", g_inject_msgs.size());
 
       printf("%s [Subframe %u] [future_time] target_sfn: %u time: %.6f s tx_advance: %.3f us\n",
              msg.file_name.c_str(),
