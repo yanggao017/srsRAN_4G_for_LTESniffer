@@ -1,0 +1,607 @@
+#include "srsran/common/interfaces_common.h"
+#include "srsran/radio/radio.h"
+#include "srsran/radio/rf_buffer.h"
+#include "srsran/radio/rf_timestamp.h"
+#include "srsran/srslog/srslog.h"
+
+extern "C" {
+#include "srsran/common/crash_handler.h"
+#include "srsran/phy/rf/rf.h"
+#include "srsran/phy/rf/rf_utils.h"
+#include "srsran/phy/ue/ue_cell_search.h"
+#include "srsran/phy/ue/ue_mib.h"
+#include "srsran/phy/ue/ue_sync.h"
+#include "srsran/srsran.h"
+}
+
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <dirent.h>
+#include <getopt.h>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
+#include <vector>
+
+namespace {
+
+struct prog_args_t {
+  std::string device_name           = "auto";
+  std::string rf_args               = "";
+  std::string rf_log_level          = "info";
+  std::string inject_type           = "";
+  double      rx_freq_hz            = 0.0;
+  double      search_srate          = SRSRAN_CS_SAMP_FREQ;
+  double      radio_srate           = 23.04e6;
+  double      tx_advance_us         = 66.0 / 30.72;
+  float       rx_gain               = 60.0f;
+  float       tx_gain               = 60.0f;
+  float       min_rx_gain           = 0.0f;
+  float       max_rx_gain           = 80.0f;
+  uint32_t    nof_antennas          = 1;
+  int         nof_subframes         = -1;
+  int         force_n_id_2          = -1;
+  bool        enable_agc            = false;
+  bool        use_standard_lte_rate = false;
+};
+
+struct tx_trigger_t {
+  bool               valid      = false;
+  uint32_t           target_sfn = 0;
+  srsran_timestamp_t tx_time    = {};
+};
+
+prog_args_t                    g_args;
+std::shared_ptr<srsran::radio> g_radio;
+volatile sig_atomic_t          g_go_exit = 0;
+const char*                    g_cache_root = "./cache";
+cf_t*                          g_paging_buffer[SRSRAN_MAX_CHANNELS] = {};
+uint32_t                       g_paging_nof_samples                 = 0;
+cell_search_cfg_t              g_cell_search_cfg                    = {
+    .max_frames_pbch      = SRSRAN_DEFAULT_MAX_FRAMES_PBCH,
+    .max_frames_pss       = SRSRAN_DEFAULT_MAX_FRAMES_PSS,
+    .nof_valid_pss_frames = SRSRAN_DEFAULT_NOF_VALID_PSS_FRAMES,
+    .init_agc             = 0,
+    .force_tdd            = false};
+
+void usage(const char* prog)
+{
+  printf("Usage: %s -f rx_freq_hz [options]\n", prog);
+  printf("  -f RX frequency in Hz\n");
+  printf("  -a RF args\n");
+  printf("  -d Device name [default auto]\n");
+  printf("  -g RX gain in dB [default %.1f]\n", g_args.rx_gain);
+  printf("  -t TX gain in dB [default %.1f]\n", g_args.tx_gain);
+  printf("  -u TX advance in us [default %.3f]\n", g_args.tx_advance_us);
+  printf("  -A Number of RX antennas [default %u]\n", g_args.nof_antennas);
+  printf("  -n Number of TX bursts after trigger [default unlimited]\n");
+  printf("  -l Force N_id_2 during search [default best]\n");
+  printf("  -m Injection type [supported: paging_imsi]\n");
+  printf("  -G Enable AGC\n");
+  printf("  -Q Use standard LTE sample rates\n");
+  printf("  -v Increase verbose level\n");
+}
+
+void parse_args(int argc, char** argv)
+{
+  int opt = 0;
+  while ((opt = getopt(argc, argv, "f:a:d:g:t:u:A:n:l:m:GQv")) != -1) {
+    switch (opt) {
+      case 'f':
+        g_args.rx_freq_hz = strtod(optarg, nullptr);
+        break;
+      case 'a':
+        g_args.rf_args = optarg;
+        break;
+      case 'd':
+        g_args.device_name = optarg;
+        break;
+      case 'g':
+        g_args.rx_gain = strtof(optarg, nullptr);
+        break;
+      case 't':
+        g_args.tx_gain = strtof(optarg, nullptr);
+        break;
+      case 'u':
+        g_args.tx_advance_us = strtod(optarg, nullptr);
+        break;
+      case 'A':
+        g_args.nof_antennas = (uint32_t)strtoul(optarg, nullptr, 10);
+        break;
+      case 'n':
+        g_args.nof_subframes = (int)strtol(optarg, nullptr, 10);
+        break;
+      case 'l':
+        g_args.force_n_id_2 = (int)strtol(optarg, nullptr, 10);
+        break;
+      case 'm':
+        g_args.inject_type = optarg;
+        break;
+      case 'G':
+        g_args.enable_agc = true;
+        g_cell_search_cfg.init_agc = (float)g_args.rx_gain;
+        break;
+      case 'Q':
+        g_args.use_standard_lte_rate = true;
+        g_args.radio_srate           = 30.72e6;
+        break;
+      case 'v':
+        increase_srsran_verbose_level();
+        break;
+      default:
+        usage(argv[0]);
+        std::exit(-1);
+    }
+  }
+
+  if (g_args.rx_freq_hz <= 0.0) {
+    usage(argv[0]);
+    std::exit(-1);
+  }
+}
+
+void sig_int_handler(int)
+{
+  g_go_exit = 1;
+}
+
+static int radio_recv_callback(void* ptr, cf_t* buffer[SRSRAN_MAX_CHANNELS], uint32_t nsamples, srsran_timestamp_t* ts)
+{
+  if (ptr == nullptr || buffer == nullptr || ts == nullptr) {
+    return SRSRAN_ERROR_INVALID_INPUTS;
+  }
+
+  auto* radio = static_cast<srsran::radio*>(ptr);
+  srsran::rf_buffer_t rf_buffer(buffer, nsamples);
+  srsran::rf_timestamp_t rf_timestamp;
+
+  if (!radio->rx_now(rf_buffer, rf_timestamp)) {
+    return SRSRAN_ERROR;
+  }
+
+  *ts = rf_timestamp.get(0);
+  return (int)nsamples;
+}
+
+static SRSRAN_AGC_CALLBACK(radio_set_rx_gain_wrapper)
+{
+  static_cast<srsran::radio*>(h)->set_rx_gain(gain_db);
+}
+
+bool is_directory(const char* path)
+{
+  struct stat st = {};
+  return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+bool file_exists(const char* path)
+{
+  struct stat st = {};
+  return stat(path, &st) == 0;
+}
+
+char* path_join(const char* a, const char* b)
+{
+  size_t len = strlen(a) + strlen(b) + 2;
+  char*  out = (char*)malloc(len);
+  if (out != nullptr) {
+    snprintf(out, len, "%s/%s", a, b);
+  }
+  return out;
+}
+
+void search_recursive(const char* root, const char* target_name, char** found_path)
+{
+  DIR* dir = opendir(root);
+  if (dir == nullptr) {
+    return;
+  }
+
+  struct dirent* entry = nullptr;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    char* subpath = path_join(root, entry->d_name);
+    if (subpath == nullptr) {
+      continue;
+    }
+
+    if (is_directory(subpath)) {
+      if (strcmp(entry->d_name, target_name) == 0) {
+        char* mib_path = path_join(subpath, "mib.json");
+        if (mib_path != nullptr && file_exists(mib_path) && *found_path == nullptr) {
+          *found_path = strdup(subpath);
+        }
+        free(mib_path);
+      }
+      search_recursive(subpath, target_name, found_path);
+    }
+
+    free(subpath);
+  }
+  closedir(dir);
+}
+
+char* find_cell_dir(uint32_t pci)
+{
+  char  target_name[64] = {};
+  char* found_path      = nullptr;
+
+  snprintf(target_name, sizeof(target_name), "cell_%u", pci);
+  search_recursive(g_cache_root, target_name, &found_path);
+  return found_path;
+}
+
+void load_paging_buffer(uint32_t pci, uint32_t nof_samples)
+{
+  char*  cell_dir  = nullptr;
+  char*  file_path = nullptr;
+  FILE*  fp        = nullptr;
+  size_t count     = 0;
+
+  if (g_args.inject_type != "paging_imsi") {
+    return;
+  }
+
+  cell_dir = find_cell_dir(pci);
+  if (cell_dir == nullptr) {
+    throw std::runtime_error("failed to find cell cache directory for paging injection");
+  }
+
+  file_path = path_join(cell_dir, "paging_imsi_sf9.fc32");
+  free(cell_dir);
+  if (file_path == nullptr) {
+    throw std::runtime_error("failed to build paging file path");
+  }
+
+  g_paging_buffer[0] = srsran_vec_cf_malloc(nof_samples);
+  if (g_paging_buffer[0] == nullptr) {
+    free(file_path);
+    throw std::runtime_error("failed to allocate paging buffer");
+  }
+  srsran_vec_cf_zero(g_paging_buffer[0], nof_samples);
+
+  fp = fopen(file_path, "rb");
+  free(file_path);
+  if (fp == nullptr) {
+    throw std::runtime_error("failed to open paging file");
+  }
+
+  count = fread(g_paging_buffer[0], sizeof(cf_t), nof_samples, fp);
+  fclose(fp);
+  if (count == 0) {
+    throw std::runtime_error("paging file is empty");
+  }
+
+  g_paging_nof_samples = nof_samples;
+  printf("[inject] loaded paging_imsi_sf9.fc32 with %zu samples\n", count);
+}
+
+void init_radio()
+{
+  srsran::rf_args_t rf_args = {};
+  rf_args.device_name       = g_args.device_name;
+  rf_args.device_args       = g_args.rf_args;
+  rf_args.log_level         = g_args.rf_log_level;
+  rf_args.srate_hz          = g_args.radio_srate;
+  rf_args.rx_gain           = g_args.rx_gain;
+  rf_args.dl_freq           = (float)g_args.rx_freq_hz;
+  rf_args.nof_carriers      = 1;
+  rf_args.nof_antennas      = g_args.nof_antennas;
+
+  g_radio = std::make_shared<srsran::radio>();
+  if (g_radio->init(rf_args, nullptr) != SRSRAN_SUCCESS) {
+    throw std::runtime_error("failed to init radio");
+  }
+
+  g_radio->set_rx_srate(g_args.search_srate);
+  g_radio->set_rx_freq(0, g_args.rx_freq_hz);
+  g_radio->set_rx_gain(g_args.rx_gain);
+  g_radio->set_tx_freq(0, g_args.rx_freq_hz);
+  g_radio->set_tx_gain(g_args.tx_gain);
+}
+
+bool search_cell(srsran_cell_t* cell, float* cfo)
+{
+  srsran_ue_cellsearch_t        cs          = {};
+  srsran_ue_cellsearch_result_t found_cells[3] = {};
+  int                           nfound      = 0;
+  int                           best_idx    = -1;
+  float                         best_psr    = -1.0f;
+
+  if (srsran_ue_cellsearch_init_multi(&cs,
+                                      g_cell_search_cfg.max_frames_pss,
+                                      radio_recv_callback,
+                                      g_args.nof_antennas,
+                                      g_radio.get()) != SRSRAN_SUCCESS) {
+    throw std::runtime_error("failed to init LTE cell search");
+  }
+
+  srsran_ue_cellsearch_set_nof_valid_frames(&cs, g_cell_search_cfg.nof_valid_pss_frames);
+  if (g_args.enable_agc) {
+    srsran_ue_sync_start_agc(&cs.ue_sync,
+                             radio_set_rx_gain_wrapper,
+                             g_args.min_rx_gain,
+                             g_args.max_rx_gain,
+                             g_cell_search_cfg.init_agc);
+  }
+
+  nfound = srsran_ue_cellsearch_scan(&cs, found_cells, nullptr);
+  if (nfound < 0) {
+    srsran_ue_cellsearch_free(&cs);
+    throw std::runtime_error("LTE cell search failed");
+  }
+
+  for (int i = 0; i < 3; ++i) {
+    if (g_args.force_n_id_2 >= 0 && (int)(found_cells[i].cell_id % 3) != g_args.force_n_id_2) {
+      continue;
+    }
+    if (found_cells[i].psr > best_psr) {
+      best_psr = found_cells[i].psr;
+      best_idx = i;
+    }
+  }
+
+  if (best_idx >= 0) {
+    cell->id         = found_cells[best_idx].cell_id;
+    cell->cp         = found_cells[best_idx].cp;
+    cell->frame_type = found_cells[best_idx].frame_type;
+    cell->nof_prb    = SRSRAN_UE_MIB_NOF_PRB;
+    cell->nof_ports  = 0;
+    if (cfo != nullptr) {
+      *cfo = found_cells[best_idx].cfo;
+    }
+    printf("[search] cell_id=%u cp=%s frame_type=%s psr=%.2f cfo=%.1f Hz\n",
+           cell->id,
+           cell->cp == SRSRAN_CP_NORM ? "Normal" : "Extended",
+           cell->frame_type == SRSRAN_FDD ? "FDD" : "TDD",
+           found_cells[best_idx].psr,
+           found_cells[best_idx].cfo);
+  }
+
+  srsran_ue_cellsearch_free(&cs);
+  return best_idx >= 0;
+}
+
+bool decode_mib(srsran_cell_t* cell, float cfo_hz, uint32_t* sfn)
+{
+  srsran_ue_mib_sync_t mib_sync = {};
+  uint8_t              bch_payload[SRSRAN_BCH_PAYLOAD_LEN] = {};
+  uint32_t             nof_ports                            = 0;
+  int                  sfn_offset                           = 0;
+
+  if (srsran_ue_mib_sync_init_multi(&mib_sync, radio_recv_callback, g_args.nof_antennas, g_radio.get()) !=
+      SRSRAN_SUCCESS) {
+    throw std::runtime_error("failed to init ue_mib_sync");
+  }
+
+  if (srsran_ue_mib_sync_set_cell(&mib_sync, *cell) != SRSRAN_SUCCESS) {
+    srsran_ue_mib_sync_free(&mib_sync);
+    throw std::runtime_error("failed to configure ue_mib_sync");
+  }
+
+  mib_sync.ue_sync.cfo_current_value       = cfo_hz / 15000.0f;
+  mib_sync.ue_sync.cfo_is_copied           = true;
+  mib_sync.ue_sync.cfo_correct_enable_find = true;
+  srsran_sync_set_cfo_cp_enable(&mib_sync.ue_sync.sfind, false, 0);
+
+  int ret = srsran_ue_mib_sync_decode(
+      &mib_sync, g_cell_search_cfg.max_frames_pbch, bch_payload, &nof_ports, &sfn_offset);
+  if (ret == SRSRAN_UE_MIB_FOUND) {
+    srsran_pbch_mib_unpack(bch_payload, cell, sfn);
+    *sfn            = (*sfn + (uint32_t)sfn_offset) % 1024;
+    cell->nof_ports = nof_ports;
+  }
+
+  srsran_ue_mib_sync_free(&mib_sync);
+  return ret == SRSRAN_UE_MIB_FOUND;
+}
+
+tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
+{
+  tx_trigger_t         trigger         = {};
+  int                  srate           = srsran_sampling_freq_hz(cell.nof_prb);
+  srsran_ue_sync_t     ue_sync         = {};
+  srsran_ue_mib_t      ue_mib          = {};
+  std::vector<cf_t*>   sf_buffer(g_args.nof_antennas, nullptr);
+  uint32_t             max_num_samples = 3 * SRSRAN_SF_LEN_PRB(cell.nof_prb);
+  uint8_t              bch_payload[SRSRAN_BCH_PAYLOAD_LEN] = {};
+  uint32_t             mib_sfn                            = 0;
+
+  if (srate <= 0) {
+    throw std::runtime_error("invalid LTE sampling rate");
+  }
+
+  g_radio->set_rx_srate((double)srate);
+  g_radio->set_tx_srate((double)srate);
+  g_radio->set_rx_freq(0, g_args.rx_freq_hz);
+  g_radio->set_rx_gain(g_args.rx_gain);
+  g_radio->set_tx_freq(0, g_args.rx_freq_hz);
+  g_radio->set_tx_gain(g_args.tx_gain);
+
+  if (srsran_ue_sync_init_multi_decim(&ue_sync,
+                                      cell.nof_prb,
+                                      false,
+                                      radio_recv_callback,
+                                      g_args.nof_antennas,
+                                      g_radio.get(),
+                                      1) != SRSRAN_SUCCESS) {
+    throw std::runtime_error("failed to init ue_sync");
+  }
+
+  if (srsran_ue_sync_set_cell(&ue_sync, cell) != SRSRAN_SUCCESS) {
+    srsran_ue_sync_free(&ue_sync);
+    throw std::runtime_error("failed to set ue_sync cell");
+  }
+
+  ue_sync.cfo_current_value        = search_cell_cfo / 15000.0f;
+  ue_sync.cfo_is_copied            = true;
+  ue_sync.cfo_correct_enable_find  = true;
+  ue_sync.cfo_correct_enable_track = true;
+  srsran_sync_set_cfo_cp_enable(&ue_sync.sfind, false, 0);
+
+  sf_buffer[0] = srsran_vec_cf_malloc(max_num_samples);
+  if (sf_buffer[0] == nullptr) {
+    srsran_ue_sync_free(&ue_sync);
+    throw std::runtime_error("failed to allocate sf buffer");
+  }
+
+  if (srsran_ue_mib_init(&ue_mib, sf_buffer[0], cell.nof_prb) != SRSRAN_SUCCESS) {
+    free(sf_buffer[0]);
+    srsran_ue_sync_free(&ue_sync);
+    throw std::runtime_error("failed to init ue_mib");
+  }
+  if (srsran_ue_mib_set_cell(&ue_mib, cell) != SRSRAN_SUCCESS) {
+    srsran_ue_mib_free(&ue_mib);
+    free(sf_buffer[0]);
+    srsran_ue_sync_free(&ue_sync);
+    throw std::runtime_error("failed to set ue_mib cell");
+  }
+
+  printf("[sync] waiting for first trigger at %.2f Msps for PCI=%u, PRB=%u\n", srate / 1e6, cell.id, cell.nof_prb);
+  if (g_args.inject_type == "paging_imsi") {
+    load_paging_buffer(cell.id, SRSRAN_SF_LEN_PRB(cell.nof_prb));
+  }
+
+  while (!g_go_exit && !trigger.valid) {
+    cf_t*              sf_ptrs[SRSRAN_MAX_CHANNELS] = {};
+    srsran_timestamp_t rx_ts                        = {};
+    int                sfn_offset                   = 0;
+
+    sf_ptrs[0] = sf_buffer[0];
+    int ret = srsran_ue_sync_zerocopy(&ue_sync, sf_ptrs, max_num_samples);
+    if (ret < 0) {
+      printf("[sync] receive/sync error\n");
+      continue;
+    }
+    if (ret == 0) {
+      continue;
+    }
+
+    srsran_ue_sync_get_last_timestamp(&ue_sync, &rx_ts);
+    printf("[sync] sf=%u rx_time=%.6f cfo=%.1f Hz sfo=%.3f\n",
+           srsran_ue_sync_get_sfidx(&ue_sync),
+           (double)rx_ts.full_secs + rx_ts.frac_secs,
+           srsran_ue_sync_get_cfo(&ue_sync),
+           srsran_ue_sync_get_sfo(&ue_sync));
+
+    if (srsran_ue_sync_get_sfidx(&ue_sync) != 0) {
+      continue;
+    }
+
+    if (srsran_ue_mib_decode(&ue_mib, bch_payload, nullptr, &sfn_offset) != SRSRAN_UE_MIB_FOUND) {
+      printf("[sync] sf0 detected but MIB decode failed\n");
+      continue;
+    }
+
+    srsran_pbch_mib_unpack(bch_payload, &cell, &mib_sfn);
+    mib_sfn = (mib_sfn + (uint32_t)sfn_offset) % 1024;
+
+    trigger.valid      = true;
+    trigger.target_sfn = mib_sfn;
+    trigger.tx_time    = rx_ts;
+    srsran_timestamp_add(&trigger.tx_time, 0, 9 * 0.001 - g_args.tx_advance_us * 1e-6);
+
+    printf("[trigger] paging_imsi target_sfn=%u target_sf=9 time=%.6f s tx_advance=%.3f us\n",
+           trigger.target_sfn,
+           (double)trigger.tx_time.full_secs + trigger.tx_time.frac_secs,
+           g_args.tx_advance_us);
+  }
+
+  srsran_ue_mib_free(&ue_mib);
+  free(sf_buffer[0]);
+  srsran_ue_sync_free(&ue_sync);
+  return trigger;
+}
+
+void run_loop_tx(tx_trigger_t trigger)
+{
+  srsran::rf_buffer_t    tx_buffer(g_paging_buffer, g_paging_nof_samples);
+  srsran::rf_timestamp_t tx_timestamp = {};
+  uint32_t               sent         = 0;
+
+  while (!g_go_exit && (g_args.nof_subframes < 0 || (int)sent < g_args.nof_subframes)) {
+    *tx_timestamp.get_ptr(0) = trigger.tx_time;
+
+    printf("paging_imsi [Subframe 9] [future_time] target_sfn: %u time: %.6f s tx_advance: %.3f us\n",
+           trigger.target_sfn,
+           (double)trigger.tx_time.full_secs + trigger.tx_time.frac_secs,
+           g_args.tx_advance_us);
+
+    if (!g_radio->tx(tx_buffer, tx_timestamp)) {
+      printf("[inject] paging timed tx failed\n");
+      break;
+    }
+
+    sent++;
+    trigger.target_sfn = (trigger.target_sfn + 1) % 1024;
+    srsran_timestamp_add(&trigger.tx_time, 0, 0.010);
+  }
+}
+
+} // namespace
+
+int main(int argc, char** argv)
+{
+  srsran_cell_t cell            = {};
+  float         search_cell_cfo = 0.0f;
+  uint32_t      sfn             = 0;
+
+  srsran_debug_handle_crash(argc, argv);
+  parse_args(argc, argv);
+  srsran_use_standard_symbol_size(g_args.use_standard_lte_rate);
+  signal(SIGINT, sig_int_handler);
+  signal(SIGTERM, sig_int_handler);
+  srslog::init();
+
+  try {
+    init_radio();
+    if (!search_cell(&cell, &search_cell_cfo)) {
+      printf("No LTE cell found at %.3f MHz\n", g_args.rx_freq_hz / 1e6);
+      g_radio->stop();
+      return 0;
+    }
+
+    if (!decode_mib(&cell, search_cell_cfo, &sfn)) {
+      printf("MIB decode failed for PCI=%u\n", cell.id);
+      g_radio->stop();
+      return 0;
+    }
+
+    printf("[mib] pci=%u sfn=%u prb=%u ports=%u cp=%s\n",
+           cell.id,
+           sfn,
+           cell.nof_prb,
+           cell.nof_ports,
+           cell.cp == SRSRAN_CP_NORM ? "Normal" : "Extended");
+
+    tx_trigger_t trigger = wait_for_first_trigger(cell, search_cell_cfo);
+    if (trigger.valid) {
+      printf("[tx-loop] first trigger acquired, switching to 10 ms periodic tx\n");
+      run_loop_tx(trigger);
+    }
+
+    if (g_paging_buffer[0] != nullptr) {
+      free(g_paging_buffer[0]);
+      g_paging_buffer[0] = nullptr;
+    }
+    g_radio->stop();
+  } catch (const std::exception& e) {
+    if (g_paging_buffer[0] != nullptr) {
+      free(g_paging_buffer[0]);
+      g_paging_buffer[0] = nullptr;
+    }
+    if (g_radio) {
+      g_radio->stop();
+    }
+    fprintf(stderr, "Error: %s\n", e.what());
+    return -1;
+  }
+
+  return 0;
+}

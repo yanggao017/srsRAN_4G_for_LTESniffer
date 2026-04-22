@@ -533,22 +533,29 @@ int gen_sib1_etws_sched(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
   free(rrc_msg);
 
   sib_type1_s& sib1 = bcch_msg.msg.c1().sib_type1();
+  sched_info_list_l original_sched_info_list = sib1.sched_info_list;
 
-
-  sib1.si_win_len = sib_type1_s::si_win_len_e_::ms40;
-  sib1.sys_info_value_tag = 1;
+  sib1.si_win_len = sib_type1_s::si_win_len_e_::ms4;
+  sib1.sys_info_value_tag = (sib1.sys_info_value_tag + 1) % 32;
   sib1.sched_info_list.clear();
 
-  sched_info_s sib3;
-  sib3.si_periodicity = si_periodicity_r12_opts::rf16;
-  sib3.sib_map_info.push_back(sib_type_e::sib_type3);
-  sib1.sched_info_list.push_back(sib3);
-  
+  if (original_sched_info_list.size() > 0) {
+    sib1.sched_info_list.push_back(original_sched_info_list[0]);
+  } else {
+    sched_info_s placeholder;
+    placeholder.si_periodicity = si_periodicity_r12_opts::rf8;
+    sib1.sched_info_list.push_back(placeholder);
+  }
+
   sched_info_s etws_sched;
-  etws_sched.si_periodicity = si_periodicity_r12_opts::rf16;
+  etws_sched.si_periodicity = si_periodicity_r12_opts::rf8;
   etws_sched.sib_map_info.push_back(sib_type_e::sib_type10);
   etws_sched.sib_map_info.push_back(sib_type_e::sib_type11);
   sib1.sched_info_list.push_back(etws_sched);
+
+  for (uint32_t i = 1; i < original_sched_info_list.size(); ++i) {
+    sib1.sched_info_list.push_back(original_sched_info_list[i]);
+  }
 
   asn1::bit_ref bref_ret(buffer, buffer_len);
   if (bcch_msg.pack(bref_ret) != SRSASN_SUCCESS) {

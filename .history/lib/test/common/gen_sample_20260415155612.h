@@ -538,11 +538,6 @@ int gen_sib1_etws_sched(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len)
   sib1.si_win_len = sib_type1_s::si_win_len_e_::ms40;
   sib1.sys_info_value_tag = 1;
   sib1.sched_info_list.clear();
-
-  sched_info_s sib3;
-  sib3.si_periodicity = si_periodicity_r12_opts::rf16;
-  sib3.sib_map_info.push_back(sib_type_e::sib_type3);
-  sib1.sched_info_list.push_back(sib3);
   
   sched_info_s etws_sched;
   etws_sched.si_periodicity = si_periodicity_r12_opts::rf16;
