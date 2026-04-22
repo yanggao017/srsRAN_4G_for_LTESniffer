@@ -92,7 +92,7 @@ void usage(const char* prog)
   printf("  -A Number of RX antennas [default %u]\n", g_args.nof_antennas);
   printf("  -n Number of TX bursts after trigger [default unlimited]\n");
   printf("  -l Force N_id_2 during search [default best]\n");
-  printf("  -m Injection type [supported: paging_imsi, paging_sib1]\n");
+  printf("  -m Injection type [supported: paging_imsi, paging_sib1, paging_sib2]\n");
   printf("  -G Enable AGC\n");
   printf("  -Q Use standard LTE sample rates\n");
   printf("  -v Increase verbose level\n");
@@ -338,6 +338,9 @@ void prepare_inject_msgs(uint32_t pci)
   } else if (g_args.inject_type == "paging_sib1") {
     g_inject_msgs.push_back({"paging_sib1", "paging_sysinfmod_sf9.fc32", 9, nullptr, 0, 0, {}});
     g_inject_msgs.push_back({"paging_sib1", "sib1_tac_sf5.fc32", 5, nullptr, 0, 0, {}});
+  } else if (g_args.inject_type == "paging_sib2") {
+    g_inject_msgs.push_back({"paging_sib2", "paging_sysinfmod_sf9.fc32", 9, nullptr, 0, 0, {}});
+    g_inject_msgs.push_back({"paging_sib2", "sib2_acbarring_sf0.fc32", 0, nullptr, 0, 0, {}});
   }
 
   for (auto& msg : g_inject_msgs) {
@@ -606,16 +609,18 @@ void run_loop_tx(tx_trigger_t trigger)
 
       *tx_timestamp.get_ptr(0) = msg.tx_time;
 
-      printf("%s [Subframe %u] [future_time] target_sfn: %u time: %.6f s tx_advance: %.3f us\n",
-             msg.file_name.c_str(),
-             msg.subframe,
-             msg.target_sfn,
-             (double)msg.tx_time.full_secs + msg.tx_time.frac_secs,
-             g_args.tx_advance_us);
+      if (sent < 5 || sent % 50 == 0) {
+        printf("%s [Subframe %u] [future_time] target_sfn: %u time: %.6f s tx_advance: %.3f us\n",
+               msg.file_name.c_str(),
+               msg.subframe,
+               msg.target_sfn,
+               (double)msg.tx_time.full_secs + msg.tx_time.frac_secs,
+               g_args.tx_advance_us);
+      }
 
       if (!g_radio->tx(tx_buffer, tx_timestamp)) {
         printf("[inject] timed tx failed for %s\n", msg.file_name.c_str());
-        return;
+        continue;
       }
 
       msg.target_sfn = (msg.target_sfn + 1) % 1024;

@@ -424,7 +424,7 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
 
     case SIB2_ACBARRING:
       rnti = SRSRAN_SIRNTI;
-      tti = 1;
+      tti = 0;
       printf("\n[RUN] Start to generate SIB2 ACBarring msg to subframe %d with rnti = 0x%x.\n", tti, rnti);
       gen_sib2_acbarring(payload[0], sizeof(uint8_t) * 2048, payload_len);
       break;
