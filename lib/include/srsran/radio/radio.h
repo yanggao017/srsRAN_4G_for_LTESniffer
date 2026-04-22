@@ -87,6 +87,7 @@ public:
   bool              is_init() override;
   void              reset() override;
   srsran_rf_info_t* get_info() override;
+  srsran_rf_t*      get_rf_device(size_t idx) { return idx < rf_devices.size() ? &rf_devices[idx] : nullptr; }
 
   // Other functions
   bool get_metrics(rf_metrics_t* metrics) final;

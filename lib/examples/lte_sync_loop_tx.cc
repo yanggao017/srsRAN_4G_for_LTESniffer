@@ -36,6 +36,7 @@ struct prog_args_t {
   std::string rf_args               = "";
   std::string rf_log_level          = "info";
   std::string inject_type           = "";
+  std::string tx_backend            = "radio";
   double      rx_freq_hz            = 0.0;
   double      search_srate          = SRSRAN_CS_SAMP_FREQ;
   double      radio_srate           = 23.04e6;
@@ -93,6 +94,7 @@ void usage(const char* prog)
   printf("  -n Number of TX bursts after trigger [default unlimited]\n");
   printf("  -l Force N_id_2 during search [default best]\n");
   printf("  -m Injection type [supported: paging_imsi, paging_sib1, paging_sib2]\n");
+  printf("  -B TX backend [radio|rf] [default %s]\n", g_args.tx_backend.c_str());
   printf("  -G Enable AGC\n");
   printf("  -Q Use standard LTE sample rates\n");
   printf("  -v Increase verbose level\n");
@@ -101,7 +103,7 @@ void usage(const char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt = 0;
-  while ((opt = getopt(argc, argv, "f:a:d:g:t:u:A:n:l:m:GQv")) != -1) {
+  while ((opt = getopt(argc, argv, "f:a:d:g:t:u:A:n:l:m:B:GQv")) != -1) {
     switch (opt) {
       case 'f':
         g_args.rx_freq_hz = strtod(optarg, nullptr);
@@ -133,6 +135,9 @@ void parse_args(int argc, char** argv)
       case 'm':
         g_args.inject_type = optarg;
         break;
+      case 'B':
+        g_args.tx_backend = optarg;
+        break;
       case 'G':
         g_args.enable_agc = true;
         g_cell_search_cfg.init_agc = (float)g_args.rx_gain;
@@ -153,6 +158,9 @@ void parse_args(int argc, char** argv)
   if (g_args.rx_freq_hz <= 0.0) {
     usage(argv[0]);
     std::exit(-1);
+  }
+  if (g_args.tx_backend != "radio" && g_args.tx_backend != "rf") {
+    throw std::runtime_error("invalid TX backend, supported values are radio and rf");
   }
 }
 
@@ -482,6 +490,30 @@ void init_radio()
   g_radio->set_tx_gain(g_args.tx_gain);
 }
 
+bool send_with_selected_backend(inject_msg_t& msg)
+{
+  if (g_args.tx_backend == "rf") {
+    srsran_rf_t* rf_dev = g_radio->get_rf_device(0);
+    if (rf_dev == nullptr) {
+      return false;
+    }
+    int ret = srsran_rf_send_timed_multi(rf_dev,
+                                         (void**)msg.rf_buffers,
+                                         msg.nof_samples,
+                                         msg.tx_time.full_secs,
+                                         msg.tx_time.frac_secs,
+                                         true,
+                                         true,
+                                         true);
+    return ret >= SRSRAN_SUCCESS;
+  }
+
+  srsran::rf_buffer_t    tx_buffer(msg.rf_buffers, msg.nof_samples);
+  srsran::rf_timestamp_t tx_timestamp = {};
+  *tx_timestamp.get_ptr(0) = msg.tx_time;
+  return g_radio->tx(tx_buffer, tx_timestamp);
+}
+
 bool search_cell(srsran_cell_t* cell, float* cfo)
 {
   srsran_ue_cellsearch_t        cs          = {};
@@ -715,11 +747,6 @@ void run_loop_tx(tx_trigger_t trigger)
     });
 
     for (auto& msg : g_inject_msgs) {
-      srsran::rf_buffer_t    tx_buffer(msg.rf_buffers, msg.nof_samples);
-      srsran::rf_timestamp_t tx_timestamp = {};
-
-      *tx_timestamp.get_ptr(0) = msg.tx_time;
-
       if (sent < 5 || sent % 50 == 0) {
         printf("%s [Subframe %u] [future_time] target_sfn: %u time: %.6f s tx_advance: %.3f us\n",
                msg.file_name.c_str(),
@@ -729,7 +756,7 @@ void run_loop_tx(tx_trigger_t trigger)
                g_args.tx_advance_us);
       }
 
-      if (!g_radio->tx(tx_buffer, tx_timestamp)) {
+      if (!send_with_selected_backend(msg)) {
         printf("[inject] timed tx failed for %s\n", msg.file_name.c_str());
         continue;
       }
