@@ -47,6 +47,7 @@ struct prog_args_t {
   float       max_rx_gain           = 80.0f;
   uint32_t    nof_antennas          = 1;
   int         nof_subframes         = -1;
+  int         resync_interval       = -1;
   int         force_n_id_2          = -1;
   bool        enable_agc            = false;
   bool        use_standard_lte_rate = false;
@@ -92,6 +93,7 @@ void usage(const char* prog)
   printf("  -u TX advance in us [default %.3f]\n", g_args.tx_advance_us);
   printf("  -A Number of RX antennas [default %u]\n", g_args.nof_antennas);
   printf("  -n Number of TX bursts after trigger [default unlimited]\n");
+  printf("  -r Re-sync after this many TX bursts [default disabled]\n");
   printf("  -l Force N_id_2 during search [default best]\n");
   printf("  -m Injection type [supported: paging_imsi, paging_sib1, paging_sib2, mib_dlband]\n");
   printf("  -B TX backend [radio|rf] [default %s]\n", g_args.tx_backend.c_str());
@@ -103,7 +105,7 @@ void usage(const char* prog)
 void parse_args(int argc, char** argv)
 {
   int opt = 0;
-  while ((opt = getopt(argc, argv, "f:a:d:g:t:u:A:n:l:m:B:GQv")) != -1) {
+  while ((opt = getopt(argc, argv, "f:a:d:g:t:u:A:n:r:l:m:B:GQv")) != -1) {
     switch (opt) {
       case 'f':
         g_args.rx_freq_hz = strtod(optarg, nullptr);
@@ -128,6 +130,9 @@ void parse_args(int argc, char** argv)
         break;
       case 'n':
         g_args.nof_subframes = (int)strtol(optarg, nullptr, 10);
+        break;
+      case 'r':
+        g_args.resync_interval = (int)strtol(optarg, nullptr, 10);
         break;
       case 'l':
         g_args.force_n_id_2 = (int)strtol(optarg, nullptr, 10);
@@ -161,6 +166,9 @@ void parse_args(int argc, char** argv)
   }
   if (g_args.tx_backend != "radio" && g_args.tx_backend != "rf") {
     throw std::runtime_error("invalid TX backend, supported values are radio and rf");
+  }
+  if (g_args.resync_interval == 0) {
+    throw std::runtime_error("resync interval must be greater than 0, or omitted to disable");
   }
 }
 
@@ -496,6 +504,19 @@ void init_radio()
   g_radio->set_tx_gain(g_args.tx_gain);
 }
 
+void cleanup_inject_msgs()
+{
+  for (auto& msg : g_inject_msgs) {
+    if (msg.buffer != nullptr) {
+      free(msg.buffer);
+      msg.buffer        = nullptr;
+      msg.rf_buffers[0] = nullptr;
+      msg.nof_samples   = 0;
+    }
+  }
+  g_inject_msgs.clear();
+}
+
 bool send_with_selected_backend(inject_msg_t& msg)
 {
   if (g_args.tx_backend == "rf") {
@@ -545,6 +566,10 @@ bool search_cell(srsran_cell_t* cell, float* cfo)
   int                           best_idx    = -1;
   float                         best_psr    = -1.0f;
 
+  g_radio->set_rx_srate(g_args.search_srate);
+  g_radio->set_rx_freq(0, g_args.rx_freq_hz);
+  g_radio->set_rx_gain(g_args.rx_gain);
+
   if (srsran_ue_cellsearch_init_multi(&cs,
                                       g_cell_search_cfg.max_frames_pss,
                                       radio_recv_callback,
@@ -568,7 +593,13 @@ bool search_cell(srsran_cell_t* cell, float* cfo)
     throw std::runtime_error("LTE cell search failed");
   }
 
-  for (int i = 0; i < 3; ++i) {
+  if (nfound == 0) {
+    printf("[search] no LTE cells found at %.3f MHz during re-sync\n", g_args.rx_freq_hz / 1e6);
+    srsran_ue_cellsearch_free(&cs);
+    return false;
+  }
+
+  for (int i = 0; i < nfound; ++i) {
     if (g_args.force_n_id_2 >= 0 && (int)(found_cells[i].cell_id % 3) != g_args.force_n_id_2) {
       continue;
     }
@@ -593,6 +624,10 @@ bool search_cell(srsran_cell_t* cell, float* cfo)
            cell->frame_type == SRSRAN_FDD ? "FDD" : "TDD",
            found_cells[best_idx].psr,
            found_cells[best_idx].cfo);
+  }
+
+  if (best_idx < 0) {
+    printf("[search] found %d LTE cell candidates, but none matched current filters\n", nfound);
   }
 
   srsran_ue_cellsearch_free(&cs);
@@ -755,13 +790,13 @@ tx_trigger_t wait_for_first_trigger(srsran_cell_t cell, float search_cell_cfo)
   return trigger;
 }
 
-void run_loop_tx(tx_trigger_t trigger)
+uint32_t run_loop_tx(int max_bursts)
 {
   uint32_t               sent         = 0;
 
   printf("[tx-loop] g_inject_msgs.size()=%zu\n", g_inject_msgs.size());
 
-  while (!g_go_exit && (g_args.nof_subframes < 0 || (int)sent < g_args.nof_subframes)) {
+  while (!g_go_exit && (max_bursts < 0 || (int)sent < max_bursts)) {
     std::sort(g_inject_msgs.begin(), g_inject_msgs.end(), [](const inject_msg_t& a, const inject_msg_t& b) {
       if (a.tx_time.full_secs != b.tx_time.full_secs) {
         return a.tx_time.full_secs < b.tx_time.full_secs;
@@ -791,6 +826,31 @@ void run_loop_tx(tx_trigger_t trigger)
     sent++;
     usleep(5000);
   }
+
+  return sent;
+}
+
+bool acquire_tx_trigger(srsran_cell_t* cell, float* search_cell_cfo, uint32_t* sfn, tx_trigger_t* trigger)
+{
+  if (!search_cell(cell, search_cell_cfo)) {
+    printf("No LTE cell found at %.3f MHz\n", g_args.rx_freq_hz / 1e6);
+    return false;
+  }
+
+  if (!decode_mib(cell, *search_cell_cfo, sfn)) {
+    printf("MIB decode failed for PCI=%u\n", cell->id);
+    return false;
+  }
+
+  printf("[mib] pci=%u sfn=%u prb=%u ports=%u cp=%s\n",
+         cell->id,
+         *sfn,
+         cell->nof_prb,
+         cell->nof_ports,
+         cell->cp == SRSRAN_CP_NORM ? "Normal" : "Extended");
+
+  *trigger = wait_for_first_trigger(*cell, *search_cell_cfo);
+  return trigger->valid;
 }
 
 } // namespace
@@ -810,47 +870,48 @@ int main(int argc, char** argv)
 
   try {
     init_radio();
-    if (!search_cell(&cell, &search_cell_cfo)) {
-      printf("No LTE cell found at %.3f MHz\n", g_args.rx_freq_hz / 1e6);
-      g_radio->stop();
-      return 0;
-    }
+    int total_sent = 0;
+    int cycle_idx  = 0;
 
-    if (!decode_mib(&cell, search_cell_cfo, &sfn)) {
-      printf("MIB decode failed for PCI=%u\n", cell.id);
-      g_radio->stop();
-      return 0;
-    }
+    while (!g_go_exit && (g_args.nof_subframes < 0 || total_sent < g_args.nof_subframes)) {
+      tx_trigger_t trigger     = {};
+      int          cycle_limit = g_args.nof_subframes < 0 ? -1 : (g_args.nof_subframes - total_sent);
 
-    printf("[mib] pci=%u sfn=%u prb=%u ports=%u cp=%s\n",
-           cell.id,
-           sfn,
-           cell.nof_prb,
-           cell.nof_ports,
-           cell.cp == SRSRAN_CP_NORM ? "Normal" : "Extended");
+      if (g_args.resync_interval > 0 && (cycle_limit < 0 || g_args.resync_interval < cycle_limit)) {
+        cycle_limit = g_args.resync_interval;
+      }
 
-    tx_trigger_t trigger = wait_for_first_trigger(cell, search_cell_cfo);
-    if (trigger.valid) {
+      cycle_idx++;
+      if (g_args.resync_interval > 0) {
+        printf("[resync] cycle=%d acquiring fresh sync for next %d TX bursts\n", cycle_idx, cycle_limit);
+      }
+
+      cleanup_inject_msgs();
+      if (!acquire_tx_trigger(&cell, &search_cell_cfo, &sfn, &trigger)) {
+        if (g_go_exit) {
+          break;
+        }
+        usleep(200000);
+        continue;
+      }
+
       printf("[tx-loop] first trigger acquired, switching to 10 ms periodic tx\n");
-      run_loop_tx(trigger);
-    }
+      uint32_t cycle_sent = run_loop_tx(cycle_limit);
+      total_sent += (int)cycle_sent;
 
-    for (auto& msg : g_inject_msgs) {
-      if (msg.buffer != nullptr) {
-        free(msg.buffer);
-        msg.buffer = nullptr;
+      if (g_args.resync_interval > 0) {
+        printf("[resync] cycle=%d completed sent=%u total_sent=%d\n", cycle_idx, cycle_sent, total_sent);
+      }
+
+      if (cycle_sent == 0 && !g_go_exit) {
+        usleep(200000);
       }
     }
-    g_inject_msgs.clear();
+
+    cleanup_inject_msgs();
     g_radio->stop();
   } catch (const std::exception& e) {
-    for (auto& msg : g_inject_msgs) {
-      if (msg.buffer != nullptr) {
-        free(msg.buffer);
-        msg.buffer = nullptr;
-      }
-    }
-    g_inject_msgs.clear();
+    cleanup_inject_msgs();
     if (g_radio) {
       g_radio->stop();
     }
