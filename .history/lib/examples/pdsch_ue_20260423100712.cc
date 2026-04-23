@@ -30,6 +30,14 @@
 #include <unistd.h>
 #include <strings.h>     // 注意：C++ 没有 <cstrings>，必须保留 .h
 #include <complex>
+#include <iostream>
+#include <vector>
+#include <cstdint>
+#include <fstream>
+#include <string>
+#include <iomanip>
+#include <filesystem>
+#include <sys/stat.h>  // for mkdir
 #include "srsran/asn1/rrc.h"
 #include "srsran/common/test_common.h"
 // C++ 中使用 std::complex 等
@@ -63,12 +71,6 @@ cell_search_cfg_t cell_detect_config = {.max_frames_pbch      = SRSRAN_DEFAULT_M
 
 #define ENABLE_AGC_DEFAULT
 #define MAX_SRATE_DELTA 2
-
-
-
-//#define STDOUT_COMPACT
-
-
 const char* output_file_name;
 //#define PRINT_CHANGE_SCHEDULING
 
@@ -112,6 +114,7 @@ typedef struct {
   int      verbose;
   bool     enable_256qam;
   bool     use_standard_lte_rate;
+  int dl_earfcn;
 } prog_args_t;
 
 void args_default(prog_args_t* args)
@@ -156,7 +159,7 @@ void args_default(prog_args_t* args)
 
 void usage(prog_args_t* args, char* prog)
 {
-  printf("Usage: %s [adgpPoOcildFRDnruMNvTG] -f rx_frequency (in Hz) | -i input_file\n", prog);
+  printf("Usage: %s [EadgpPoOcildFRDnruMNvTG] -f rx_frequency (in Hz) | -i input_file\n", prog);
 #ifndef DISABLE_RF
   printf("\t-I RF dev [Default %s]\n", args->rf_dev);
   printf("\t-a RF args [Default %s]\n", args->rf_args);
@@ -202,8 +205,11 @@ void parse_args(prog_args_t* args, int argc, char** argv)
   int opt;
   args_default(args);
 
-  while ((opt = getopt(argc, argv, "adAogliIpPcOCtdDFRqnvrfuUsSZyWMNBTGQ")) != -1) {
+  while ((opt = getopt(argc, argv, "EadAogliIpPcOCtdDFRqnvrfuUsSZyWMNBTGQ")) != -1) {
     switch (opt) {
+      case 'E':
+        args->dl_earfcn = (int)strtol(argv[optind], NULL, 10);
+        break;
       case 'i':
         args->input_file_name = argv[optind];
         break;
@@ -386,12 +392,12 @@ srsran_netsink_t net_sink, net_sink_signal;
   prev_nof_lines = this_nof_lines
 #define PRINT_LINE_ADVANCE_CURSOR() printf("\033[%dB", prev_nof_lines + 1)
 
-void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS]);
+void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS], int rx_tti);
 void save_mib_and_cell_info(
   const uint8_t*       bch_payload,    // 24 字节原始 MIB payload
-  const mib_s&         mib,           // 解码后的 MIB 结构
   const srsran_cell_t& cell);          // 小区配置（不含 SFN）
-
+bool save_to_output(const std::string& filename, const std::string& content);
+void pack_bits_to_bytes(const uint8_t* bits, uint8_t* bytes);
 int main(int argc, char** argv)
 {
   int ret;
@@ -744,6 +750,9 @@ int main(int argc, char** argv)
               srsran_pbch_mib_unpack(bch_payload, &cell, &sfn);
               srsran_cell_fprint(stdout, &cell, sfn);
               printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
+              save_mib_and_cell_info(bch_payload, cell);
+              
+
               sfn   = (sfn + sfn_offset) % 1024;
               state = DECODE_PDSCH;
             }
@@ -798,7 +807,7 @@ int main(int argc, char** argv)
                   nof_detected++;
                   last_decoded_tm = tm;
                   for (uint32_t tb = 0; tb < SRSRAN_MAX_CODEWORDS; tb++) {
-                    handle_pdsch_pdu(&pdsch_cfg, data);
+                    handle_pdsch_pdu(&pdsch_cfg, data, dl_sf.tti);
                     if (pdsch_cfg.grant.tb[tb].enabled) {
                       if (!acks[tb]) {
                         if (sf_type == SRSRAN_SF_NORM) {
@@ -892,59 +901,6 @@ int main(int argc, char** argv)
               rsrp1 = 0;
             }
           }
-
-          // Plot and Printf
-          if (sf_idx == 5) {
-            float gain = prog_args.rf_gain;
-            if (gain < 0) {
-              gain = srsran_convert_power_to_dB(srsran_agc_get_gain(&ue_sync.agc));
-            }
-
-            /* Print transmission scheme */
-
-            /* Print basic Parameters */
-            PRINT_LINE("          CFO: %+7.2f Hz", srsran_ue_sync_get_cfo(&ue_sync));
-            PRINT_LINE("         RSRP: %+5.1f dBm | %+5.1f dBm", rsrp0, rsrp1);
-            PRINT_LINE("          SNR: %+5.1f dB", snr);
-            PRINT_LINE("           TM: %d", last_decoded_tm + 1);
-            PRINT_LINE(
-                "           Rb: %6.2f / %6.2f / %6.2f Mbps (net/maximum/processing)", uerate, enodebrate, procrate);
-            PRINT_LINE("   PDCCH-Miss: %5.2f%%", 100 * (1 - (float)nof_detected / nof_trials));
-            PRINT_LINE("   PDSCH-BLER: %5.2f%%", (float)100 * pkt_errors / pkt_total);
-            PRINT_LINE("   PDSCH-EVM: %5.2f%%", ue_dl.pdsch.avg_evm);
-
-            if (prog_args.mbsfn_area_id > -1) {
-              PRINT_LINE("   PMCH-BLER: %5.2f%%", (float)100 * pkt_errors / pmch_pkt_total);
-            }
-
-            PRINT_LINE("         TB 0: mcs=%d; tbs=%d", pdsch_cfg.grant.tb[0].mcs_idx, pdsch_cfg.grant.tb[0].tbs);
-            PRINT_LINE("         TB 1: mcs=%d; tbs=%d", pdsch_cfg.grant.tb[1].mcs_idx, pdsch_cfg.grant.tb[1].tbs);
-
-            /* MIMO: if tx and rx antennas are bigger than 1 */
-            if (cell.nof_ports > 1 && ue_dl.pdsch.nof_rx_antennas > 1) {
-              uint32_t ri = 0;
-              float    cn = 0;
-              /* Compute condition number */
-              if (srsran_ue_dl_select_ri(&ue_dl, &ri, &cn)) {
-                /* Condition number calculation is not supported for the number of tx & rx antennas*/
-                PRINT_LINE("            κ: NA");
-              } else {
-                /* Print condition number */
-                PRINT_LINE("            κ: %.1f dB, RI=%d (Condition number, 0 dB => Best)", cn, ri);
-              }
-              PRINT_LINE("");
-            }
-            if (chest_pdsch_cfg.sync_error_enable) {
-              for (uint32_t i = 0; i < cell.nof_ports; i++) {
-                for (uint32_t j = 0; j < prog_args.rf_nof_rx_ant; j++) {
-                  PRINT_LINE("sync_err[%d][%d]=%f", i, j, sync_err[i][j]);
-                }
-              }
-            }
-            PRINT_LINE("Press enter maximum printing debug log of 1 subframe.");
-            PRINT_LINE("");
-            PRINT_LINE_RESET_CURSOR();
-          }
           break;
       }
       if (sf_idx == 9) {
@@ -991,26 +947,18 @@ int main(int argc, char** argv)
   }
 #endif
 
-  printf("\nBye\n");
-  exit(0);
+  //printf("\nBye\n");
+  return 0;
 }
-//把GUI删了
 using namespace asn1;
 using namespace asn1::rrc;
-#include <fstream>
-#include <string>
-#include <vector>
-#include <iomanip>
 
-// 缓存：只在收到时保存一次
 static std::string sib1_json;
 static std::string sib2_json;
 static std::string sib1_hex;
 static std::string sib2_hex;
 
 static bool sibs_completed = false;
-
-// 辅助函数：将字节数组转为连续小写 hex 字符串
 std::string bytes_to_hex(const uint8_t* data, size_t len) {
   std::stringstream ss;
   ss << std::hex << std::setfill('0');
@@ -1020,7 +968,7 @@ std::string bytes_to_hex(const uint8_t* data, size_t len) {
   return ss.str();
 }
 
-void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS]) {
+void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CODEWORDS], int rx_tti) {
   if (sibs_completed) {
     return; // 已完成，不再处理
   }
@@ -1028,20 +976,18 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
   int nof_tb = pdsch_cfg->grant.nof_tb;
 
   if (pdsch_cfg->rnti == SRSRAN_SIRNTI) {
-    printf("Received SI message - RNTI: 0xFFFE (SI-RNTI)\n");
+    //printf("Received SI message - RNTI: 0xFFFF (SI-RNTI)\n");
 
     for (int i = 0; i < nof_tb; i++) {
       if (!pdsch_cfg->grant.tb[i].enabled) continue;
 
       int len = pdsch_cfg->grant.tb[i].tbs / 8;
-      if (len <= 0) continue;
-
-      printf("TB %d: TBS = %d bits (%d bytes)\n", i, pdsch_cfg->grant.tb[i].tbs, len);
+      if (len <= 0) continue;     
 
       cbit_ref bref(data[i], len);
       bcch_dl_sch_msg_s bcch_msg;
       if (bcch_msg.unpack(bref) != SRSASN_SUCCESS) {
-        printf("Failed to unpack BCCH DL-SCH message\n");
+        printf("[ERROR] Failed to unpack BCCH DL-SCH message\n");
         continue;
       }
 
@@ -1066,14 +1012,14 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         // === 处理 SystemInfo (包含 SIB2) ===
         else if (c1.type() == bcch_dl_sch_msg_type_c::c1_c_::types::sys_info) {
           if (sib2_json.empty()) {
-            printf("✅ Decoded SystemInfo (possible SIB2)\n");
-
+            printf("[OK] Decoded SystemInfo (possible SIB2)\n");
+            printf("tti:%d  TB %d: TBS = %d bits (%d bytes)\n", rx_tti, i, pdsch_cfg->grant.tb[i].tbs, len);
             auto* crit_exts = &c1.sys_info().crit_exts;
             if (crit_exts->type() == sys_info_s::crit_exts_c_::types::sys_info_r8) {
               sys_info_r8_ies_s& r8 = crit_exts->sys_info_r8();
               for (auto& item : r8.sib_type_and_info) {
                 if (item.type() == sib_info_item_c::types::sib2) {
-                  printf("✅ Found SIB2 inside SystemInfo\n");
+                  //printf("[OK] Found SIB2 inside SystemInfo\n");
 
                   // 保存 JSON
                   json_writer js;
@@ -1090,46 +1036,15 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
           }
         }
 
-        // ✅ 检查是否两个都已收到
         if (!sib1_json.empty() && !sib2_json.empty()) {
-          printf("\n🎉 Both SIB1 and SIB2 captured! Writing all files once and exiting...\n");
-
-          // ====== 一次性写入所有文件 ======
-
-          // 写 SIB1 JSON
-          std::ofstream f1("sib1.json");
-          if (f1.is_open()) {
-            f1 << sib1_json << std::endl;
-            f1.close();
-            printf("📄 Wrote SIB1 JSON to sib1.json\n");
-          }
-
-          // 写 SIB2 JSON
-          std::ofstream f2("sib2.json");
-          if (f2.is_open()) {
-            f2 << sib2_json << std::endl;
-            f2.close();
-            printf("📄 Wrote SIB2 JSON to sib2.json\n");
-          }
-
-          // 写 SIB1 HEX
-          std::ofstream f3("sib1.hex");
-          if (f3.is_open()) {
-            f3 << sib1_hex << std::endl;
-            f3.close();
-            printf("헥스 Wrote SIB1 hex to sib1.hex\n");
-          }
-
-          // 写 SIB2 HEX
-          std::ofstream f4("sib2.hex");
-          if (f4.is_open()) {
-            f4 << sib2_hex << std::endl;
-            f4.close();
-            printf("헥스 Wrote SIB2 hex to sib2.hex\n");
-          }
-
+          printf("\n[OK] Both SIB1 and SIB2 captured! Writing all files once and exiting...\n");
+          save_to_output("sib1.json", sib1_json);
+          save_to_output("sib2.json", sib2_json);
+          save_to_output("sib1.hex", sib1_hex);
+          save_to_output("sib2.hex", sib2_hex);
           sibs_completed = true;
-          exit(0); // 成功获取全部，退出
+          go_exit = true;
+          return;
         }
       }
     }
@@ -1137,77 +1052,133 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
 }
 
 
-void save_mib_and_cell_info(
-    const uint8_t*       bch_payload,    // 24 字节原始 MIB payload
-    const mib_s&         mib,           // 解码后的 MIB 结构
-    const srsran_cell_t& cell)          // 小区配置（不含 SFN）
+
+void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cell)
 {
   static bool saved = false;
   if (saved) {
     return; // 确保只保存一次
   }
+  uint8_t rrc_msg[3];
+  pack_bits_to_bytes(bch_payload, rrc_msg);  // 打包 24 bits -> 3 bytes
+  //uint8_t  rrc_msg[]   = {0x94, 0x64, 0xC0};
+  int rrc_msg_len = sizeof(rrc_msg); // = 3
+  cbit_ref bref(&rrc_msg[0], rrc_msg_len);
+  bcch_bch_msg_s bcch_bch_msg;
+  bcch_bch_msg.unpack(bref);
 
-  printf("🎉 Saving MIB and Cell info to files...\n");
+  mib_s& mib = bcch_bch_msg.msg; // ✅ 使用解码后的 mib
 
-  // --- 1. 保存 MIB HEX (24 bytes) ---
-  std::ofstream f_hex("mib.hex");
-  if (f_hex.is_open()) {
-    f_hex << std::hex << std::setfill('0');
-    for (int i = 0; i < SRSRAN_BCH_PAYLOAD_LEN; ++i) {
-      f_hex << std::setw(2) << static_cast<int>(bch_payload[i]);
-    }
-    f_hex << std::endl;
-    f_hex.close();
-    printf("헥스 Wrote MIB hex to mib.hex\n");
+  printf("[OK] Saving MIB and Cell info to files...\n");
+  std::string hex_str;
+  for (int i = 0; i < rrc_msg_len; ++i) {
+    char buf[3];
+    snprintf(buf, sizeof(buf), "%02x", rrc_msg[i]);
+    hex_str += buf;
   }
+  save_to_output("mib.hex", hex_str);
 
-  // --- 2. 保存 MIB JSON (使用原生 to_json) ---
   asn1::json_writer js_mib;
-  mib.to_json(js_mib);
+  mib.to_json(js_mib); 
   std::string mib_json_str = js_mib.to_string();
+  save_to_output("mib.json", mib_json_str);
 
-  std::ofstream f_mib("mib.json");
-  if (f_mib.is_open()) {
-    f_mib << mib_json_str << std::endl;
-    f_mib.close();
-    printf("📄 Wrote MIB JSON to mib.json\n");
+  int  ul_earfcn = 0;
+  double ul_freq_hz;
+  ul_earfcn = srsran_band_ul_earfcn(prog_args.dl_earfcn);
+  ul_freq_hz = 1e6 * srsran_band_fu(ul_earfcn);
+  if (ul_freq_hz == 0.0) {
+    printf("[ERROR] Couldn't derive UL frequency for EARFCN=%d\n", ul_earfcn);
   }
-
-  // --- 3. 保存 Cell JSON ---
   asn1::json_writer js_cell;
-  js_cell.start_object();
-  js_cell.write("pci", cell.id);
-  js_cell.write("nof_prb", cell.nof_prb);
-  js_cell.write("nof_ports", cell.nof_ports);
-  js_cell.write("frame_type", cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD");
-  js_cell.write("cp", srsran_cp_string(cell.cp));
+  js_cell.start_obj();
+  js_cell.write_int("DL Freq", prog_args.rf_freq);
+  js_cell.write_int("DL Earfcn", prog_args.dl_earfcn);
+  js_cell.write_int("UL Freq", ul_freq_hz);
+  js_cell.write_int("UL Earfcn", ul_earfcn);
+  js_cell.write_str("Type", cell.frame_type == SRSRAN_FDD ? "FDD" : "TDD");
+  js_cell.write_int("PCI", cell.id);
+  js_cell.write_int("Nof Ports", cell.nof_ports);
+  js_cell.write_str("CP", srsran_cp_string(cell.cp));
+  js_cell.write_int("PRB", cell.nof_prb);
 
   // PHICH Length
-  js_cell.key("phich_length");
-  js_cell.start_object();
-  js_cell.write("value", cell.phich_length == SRSRAN_PHICH_LEN_NORMAL ? "normal" : "extended");
-  js_cell.end_object();
+  js_cell.write_str("PHICH Length", 
+                   cell.phich_length == SRSRAN_PHICH_NORM ? "normal" : "extended");
 
   // PHICH Resources
-  js_cell.key("phich_resources");
-  js_cell.start_object();
+  int phich_res_str;
   switch (cell.phich_resources) {
-    case SRSRAN_PHICH_R_ONE_SIXTH: js_cell.write("value", "oneSixth"); break;
-    case SRSRAN_PHICH_R_HALF:      js_cell.write("value", "half");      break;
-    case SRSRAN_PHICH_R_ONE:       js_cell.write("value", "one");       break;
-    case SRSRAN_PHICH_R_TWO:       js_cell.write("value", "two");       break;
-    default:                       js_cell.write("value", "error");     break;
+    case SRSRAN_PHICH_R_1_6: phich_res_str = 0; break;
+    case SRSRAN_PHICH_R_1_2: phich_res_str = 1;     break;
+    case SRSRAN_PHICH_R_1:   phich_res_str = 2;      break;
+    case SRSRAN_PHICH_R_2:   phich_res_str = 3;      break;
+    default:                 phich_res_str = 4;    break;
   }
-  js_cell.end_object();
-
-  js_cell.end_object();
-
-  std::ofstream f_cell("cell.json");
-  if (f_cell.is_open()) {
-    f_cell << js_cell.to_string() << std::endl;
-    f_cell.close();
-    printf("📄 Wrote Cell JSON to cell.json\n");
-  }
-
+  js_cell.write_int("PHICH Resources", phich_res_str);
+  js_cell.end_obj();  // ✅ 不是 end_object()
+  save_to_output("cell.json", js_cell.to_string());
   saved = true;
+}
+
+
+/**
+ * @brief 将内容写入 output/ 目录下的指定文件，自动创建目录，并在内容末尾添加 \n
+ * 
+ * @param filename 文件名（如 "mib.hex", "cell.json"）
+ * @param content  要写入的内容（无需手动加 \n）
+ * @return true     成功
+ * @return false    失败
+ */
+#ifdef _WIN32
+  #include <direct.h>  // Windows
+  #define MKDIR(path) _mkdir(path)
+#else
+  #define MKDIR(path) mkdir(path, 0755)
+#endif
+
+bool save_to_output(const std::string& filename, const std::string& content) {
+  // ✅ 函数内固定路径
+  const std::string base_dir = "../output";
+  const std::string filepath = base_dir + "/" + filename;
+
+  // 检查目录是否存在（简单判断：尝试创建，如果失败可能是已存在）
+  if (MKDIR(base_dir.c_str()) != 0) {
+    // 如果 mkdir 失败，检查是否是因为目录已存在
+    struct stat info;
+    if (stat(base_dir.c_str(), &info) != 0 || !(info.st_mode & S_IFDIR)) {
+      std::cerr << "[ERROR] Failed to create directory: " << base_dir << std::endl;
+      return false;
+    }
+  }
+
+  // 写入文件（自动添加 \n）
+  std::ofstream file(filepath);
+  if (!file.is_open()) {
+    std::cerr << "[ERROR] Cannot open file for writing: " << filepath << std::endl;
+    return false;
+  }
+
+  file << content;
+  if (file.fail()) {
+    std::cerr << "[ERROR] Error writing to file: " << filepath << std::endl;
+    file.close();
+    return false;
+  }
+
+  file.close();
+  printf("[OK] Wrote to file: %s\n", filepath.c_str());
+  return true;
+}
+void pack_bits_to_bytes(const uint8_t* bits, uint8_t* bytes) {
+  int len_bits = SRSRAN_BCH_PAYLOAD_LEN;
+  int len_bytes = len_bits / 8;
+  for (int i = 0; i < len_bytes; ++i) {
+    uint8_t byte = 0;
+    for (int j = 0; j < 8; ++j) {
+      byte <<= 1;                    // 左移一位
+      byte |= bits[i * 8 + j];       // 加上当前比特
+    }
+    bytes[i] = byte;
+  }
 }

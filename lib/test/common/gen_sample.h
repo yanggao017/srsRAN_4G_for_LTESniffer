@@ -482,6 +482,37 @@ int gen_sib1_tac(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len, int ta
   *msg_len = len;
   return 0;
 }
+
+int gen_sib1_cellbarring(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) {
+  uint8_t* rrc_msg = NULL;
+  size_t rrc_msg_len = 0;
+  if (read_hex_file_to_byte_array(sib1_path, &rrc_msg, &rrc_msg_len) != 0) {
+      return -1;
+  }
+  if (rrc_msg_len == 0 || rrc_msg_len > buffer_len) {
+      fprintf(stderr, "❌ Invalid message length: %zu\n", rrc_msg_len);
+      free(rrc_msg);
+      return -1;
+  }
+  cbit_ref bref(&rrc_msg[0], rrc_msg_len);
+  bcch_dl_sch_msg_s bcch_msg;
+  bcch_msg.unpack(bref);
+  sib_type1_s& data = bcch_msg.msg.c1().sib_type1();
+  data.cell_access_related_info.cell_barred = sib_type1_s::cell_access_related_info_s_::cell_barred_opts::barred;
+  data.cell_access_related_info.intra_freq_resel =
+      sib_type1_s::cell_access_related_info_s_::intra_freq_resel_opts::not_allowed;
+
+  asn1::bit_ref bref_ret(buffer, buffer_len);
+  if (bcch_msg.pack(bref_ret) != SRSRAN_SUCCESS) {
+    ERROR("Error encoded sib1 message");
+    return -1;
+  }
+  int len = bref_ret.distance_bytes(buffer);
+  print_sib1_modified_fields("cellbarring", "cell_barred=barred intra_freq_resel=notAllowed");
+  *msg_len = len;
+  return 0;
+}
+
 int gen_sib1_original(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) {
   uint8_t* rrc_msg = NULL;
   size_t rrc_msg_len = 0;

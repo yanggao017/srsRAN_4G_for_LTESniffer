@@ -456,7 +456,7 @@ void prepare_inject_msgs(uint32_t pci, uint32_t samples_per_subframe)
     g_inject_msgs.push_back({"paging_sib2", "paging_sysinfmod_sf9.fc32", 9, nullptr, 0, 0, {}});
     g_inject_msgs.push_back({"paging_sib2", "sib2_acbarring_sf0.fc32", 0, nullptr, 0, 0, {}});
   } else if (g_args.inject_type == "mib_dlband") {
-    g_inject_msgs.push_back({"mib_dlband", "mib_dlband_sf200.fc32", 0, nullptr, 0, 0, {}});
+    g_inject_msgs.push_back({"mib_dlband", "mib_dlband_sf990.fc32", 9, nullptr, 0, 0, {}});
   } else {
     throw std::runtime_error("unsupported injection type");
   }
@@ -532,7 +532,7 @@ const char* mode_desc(const inject_msg_t& msg)
     return "paging(sysinfmod) sib2(acbarring) sf9->sf0";
   }
   if (msg.mode_name == "mib_dlband") {
-    return "mib(dlband=n6) sf0";
+    return "mib(dlband=n6) sf9";
   }
   return msg.mode_name.c_str();
 }

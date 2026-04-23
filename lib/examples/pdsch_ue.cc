@@ -36,6 +36,7 @@
 #include <fstream>
 #include <string>
 #include <iomanip>
+#include <cstdarg>
 #include <filesystem>
 #include <sys/stat.h>  // for mkdir
 #include "srsran/asn1/rrc.h"
@@ -116,6 +117,10 @@ typedef struct {
   bool     use_standard_lte_rate;
   int dl_earfcn;
 } prog_args_t;
+
+static void print_stage(const char* stage, const char* detail);
+static void print_stagef(const char* stage, const char* fmt, ...);
+static void print_cell_summary_colored(const srsran_cell_t* cell, uint32_t sfn);
 
 void args_default(prog_args_t* args)
 {
@@ -463,7 +468,7 @@ int main(int argc, char** argv)
 
 #ifndef DISABLE_RF
   if (!prog_args.input_file_name) {
-    printf("Opening RF device with %d RX antennas...\n", prog_args.rf_nof_rx_ant);
+    print_stagef("rf", "opening device with %d RX antenna(s)", prog_args.rf_nof_rx_ant);
     if (srsran_rf_open_devname(&rf, 
       prog_args.rf_dev, 
       const_cast<char*>(prog_args.rf_args), 
@@ -475,7 +480,7 @@ int main(int argc, char** argv)
     if (prog_args.rf_gain > 0) {
       srsran_rf_set_rx_gain(&rf, prog_args.rf_gain);
     } else {
-      printf("Starting AGC thread...\n");
+      print_stage("rf", "starting AGC thread");
       if (srsran_rf_start_gain_thread(&rf, false)) {
         ERROR("Error opening rf");
         exit(-1);
@@ -491,10 +496,11 @@ int main(int argc, char** argv)
     signal(SIGINT, sig_int_handler);
 
     /* set receiver frequency */
-    printf("Tuning receiver to %.3f MHz\n", (prog_args.rf_freq + prog_args.file_offset_freq) / 1000000);
+    print_stagef("rf", "tuning receiver to %.3f MHz", (prog_args.rf_freq + prog_args.file_offset_freq) / 1000000);
     srsran_rf_set_rx_freq(&rf, prog_args.rf_nof_rx_ant, prog_args.rf_freq + prog_args.file_offset_freq);
 
     uint32_t ntrial = 0;
+    print_stage("sync", "searching for cell");
     do {
       ret = rf_search_and_decode_mib(
           &rf, prog_args.rf_nof_rx_ant, &cell_detect_config, prog_args.force_N_id_2, &cell, &search_cell_cfo);
@@ -502,7 +508,7 @@ int main(int argc, char** argv)
         ERROR("Error searching for cell");
         exit(-1);
       } else if (ret == 0 && !go_exit) {
-        printf("Cell not found after [%4d] attempts. Trying again... (Ctrl+C to exit)\n", ntrial++);
+        print_stagef("sync", "cell not found after %u attempt(s), retrying", ntrial++);
       }
     } while (ret == 0 && !go_exit);
 
@@ -514,7 +520,7 @@ int main(int argc, char** argv)
     /* set sampling frequency */
     int srate = srsran_sampling_freq_hz(cell.nof_prb);
     if (srate != -1) {
-      printf("Setting rx sampling rate %.2f MHz\n", (float)srate / 1000000);
+      print_stagef("rf", "setting RX sampling rate %.2f MHz", (float)srate / 1000000);
       float srate_rf = srsran_rf_set_rx_srate(&rf, (double)srate);
       if (abs(srate - (int)srate_rf) > MAX_SRATE_DELTA) {
         ERROR("Could not set rx sampling rate : wanted %d got %f", srate, srate_rf);
@@ -748,8 +754,8 @@ int main(int argc, char** argv)
               exit(-1);
             } else if (n == SRSRAN_UE_MIB_FOUND) {
               srsran_pbch_mib_unpack(bch_payload, &cell, &sfn);
-              srsran_cell_fprint(stdout, &cell, sfn);
-              printf("Decoded MIB. SFN: %d, offset: %d\n", sfn, sfn_offset);
+              print_cell_summary_colored(&cell, sfn);
+              print_stagef("mib", "decoded successfully: sfn=%d offset=%d", sfn, sfn_offset);
               save_mib_and_cell_info(bch_payload, cell);
               
 
@@ -947,7 +953,7 @@ int main(int argc, char** argv)
   }
 #endif
 
-  printf("\nBye\n");
+  //printf("\nBye\n");
   return 0;
 }
 using namespace asn1;
@@ -959,6 +965,59 @@ static std::string sib1_hex;
 static std::string sib2_hex;
 
 static bool sibs_completed = false;
+static void print_stage(const char* stage, const char* detail)
+{
+  if (detail != nullptr && detail[0] != '\0') {
+    printf("[%s] %s\n", stage, detail);
+  } else {
+    printf("[%s]\n", stage);
+  }
+}
+
+static void print_stagef(const char* stage, const char* fmt, ...)
+{
+  printf("[%s] ", stage);
+  va_list args;
+  va_start(args, fmt);
+  vprintf(fmt, args);
+  va_end(args);
+  printf("\n");
+}
+
+static const char* phich_res_to_string(srsran_phich_r_t phich_res)
+{
+  switch (phich_res) {
+    case SRSRAN_PHICH_R_1_6:
+      return "1/6";
+    case SRSRAN_PHICH_R_1_2:
+      return "1/2";
+    case SRSRAN_PHICH_R_1:
+      return "1";
+    case SRSRAN_PHICH_R_2:
+      return "2";
+    default:
+      return "?";
+  }
+}
+
+static void print_cell_summary_colored(const srsran_cell_t* cell, uint32_t sfn)
+{
+  const char* cyan   = "\033[36m";
+  const char* green  = "\033[32m";
+  const char* reset  = "\033[0m";
+  printf("%s - Type:%s            %s\n", cyan, reset, cell->frame_type == SRSRAN_FDD ? "FDD" : "TDD");
+  printf("%s - PCI:%s             %d\n", cyan, reset, cell->id);
+  printf("%s - Nof ports:%s       %d\n", cyan, reset, cell->nof_ports);
+  printf("%s - CP:%s              %s\n", cyan, reset, srsran_cp_string(cell->cp));
+  printf("%s - PRB:%s             %d\n", cyan, reset, cell->nof_prb);
+  printf("%s - PHICH Length:%s    %s\n",
+         cyan,
+         reset,
+         cell->phich_length == SRSRAN_PHICH_EXT ? "Extended" : "Normal");
+  printf("%s - PHICH Resources:%s %s\n", cyan, reset, phich_res_to_string(cell->phich_resources));
+  printf("%s - SFN:%s             %s%u%s\n", cyan, reset, green, sfn, reset);
+}
+
 std::string bytes_to_hex(const uint8_t* data, size_t len) {
   std::stringstream ss;
   ss << std::hex << std::setfill('0');
@@ -987,7 +1046,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
       cbit_ref bref(data[i], len);
       bcch_dl_sch_msg_s bcch_msg;
       if (bcch_msg.unpack(bref) != SRSASN_SUCCESS) {
-        printf("[ERROR] Failed to unpack BCCH DL-SCH message\n");
+        print_stage("error", "failed to unpack BCCH DL-SCH message");
         continue;
       }
 
@@ -997,7 +1056,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         // === 处理 SIB1 ===
         if (c1.type() == bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1) {
           if (sib1_json.empty()) {
-            printf("✅ Decoded SIB1 successfully\n");
+            print_stage("sib1", "decoded successfully");
 
             // 保存 JSON
             json_writer js;
@@ -1012,8 +1071,11 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         // === 处理 SystemInfo (包含 SIB2) ===
         else if (c1.type() == bcch_dl_sch_msg_type_c::c1_c_::types::sys_info) {
           if (sib2_json.empty()) {
-            printf("[OK] Decoded SystemInfo (possible SIB2)\n");
-            printf("tti:%d  TB %d: TBS = %d bits (%d bytes)\n", rx_tti, i, pdsch_cfg->grant.tb[i].tbs, len);
+            print_stagef("sib2", "decoded from SystemInfo: tti=%d tb=%d tbs=%d bits (%d bytes)",
+                         rx_tti,
+                         i,
+                         pdsch_cfg->grant.tb[i].tbs,
+                         len);
             auto* crit_exts = &c1.sys_info().crit_exts;
             if (crit_exts->type() == sys_info_s::crit_exts_c_::types::sys_info_r8) {
               sys_info_r8_ies_s& r8 = crit_exts->sys_info_r8();
@@ -1037,7 +1099,7 @@ void handle_pdsch_pdu(srsran_pdsch_cfg_t* pdsch_cfg, uint8_t* data[SRSRAN_MAX_CO
         }
 
         if (!sib1_json.empty() && !sib2_json.empty()) {
-          printf("\n[OK] Both SIB1 and SIB2 captured! Writing all files once and exiting...\n");
+          print_stage("done", "captured SIB1 and SIB2, writing files");
           save_to_output("sib1.json", sib1_json);
           save_to_output("sib2.json", sib2_json);
           save_to_output("sib1.hex", sib1_hex);
@@ -1069,7 +1131,7 @@ void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cel
 
   mib_s& mib = bcch_bch_msg.msg; // ✅ 使用解码后的 mib
 
-  printf("[OK] Saving MIB and Cell info to files...\n");
+  print_stage("save", "writing MIB and cell files");
   std::string hex_str;
   for (int i = 0; i < rrc_msg_len; ++i) {
     char buf[3];
@@ -1088,7 +1150,7 @@ void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cel
   ul_earfcn = srsran_band_ul_earfcn(prog_args.dl_earfcn);
   ul_freq_hz = 1e6 * srsran_band_fu(ul_earfcn);
   if (ul_freq_hz == 0.0) {
-    printf("[ERROR] Couldn't derive UL frequency for EARFCN=%d\n", ul_earfcn);
+    print_stagef("error", "couldn't derive UL frequency for EARFCN=%d", ul_earfcn);
   }
   asn1::json_writer js_cell;
   js_cell.start_obj();
@@ -1107,15 +1169,15 @@ void save_mib_and_cell_info(const uint8_t* bch_payload, const srsran_cell_t& cel
                    cell.phich_length == SRSRAN_PHICH_NORM ? "normal" : "extended");
 
   // PHICH Resources
-  int phich_res_str;
+  const char* phich_res_str;
   switch (cell.phich_resources) {
-    case SRSRAN_PHICH_R_1_6: phich_res_str = 0; break;
-    case SRSRAN_PHICH_R_1_2: phich_res_str = 1;     break;
-    case SRSRAN_PHICH_R_1:   phich_res_str = 2;      break;
-    case SRSRAN_PHICH_R_2:   phich_res_str = 3;      break;
-    default:                 phich_res_str = 4;    break;
+    case SRSRAN_PHICH_R_1_6: phich_res_str = "oneSixth"; break;
+    case SRSRAN_PHICH_R_1_2: phich_res_str = "half";     break;
+    case SRSRAN_PHICH_R_1:   phich_res_str = "one";      break;
+    case SRSRAN_PHICH_R_2:   phich_res_str = "two";      break;
+    default:                 phich_res_str = "unknown";  break;
   }
-  js_cell.write_int("PHICH Resources", phich_res_str);
+  js_cell.write_str("PHICH Resources", phich_res_str);
   js_cell.end_obj();  // ✅ 不是 end_object()
   save_to_output("cell.json", js_cell.to_string());
   saved = true;
@@ -1167,7 +1229,7 @@ bool save_to_output(const std::string& filename, const std::string& content) {
   }
 
   file.close();
-  printf("[OK] Wrote to file: %s\n", filepath.c_str());
+  print_stagef("save", "wrote %s", filepath.c_str());
   return true;
 }
 void pack_bits_to_bytes(const uint8_t* bits, uint8_t* bytes) {

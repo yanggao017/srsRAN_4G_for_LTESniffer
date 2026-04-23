@@ -575,7 +575,7 @@ void generate_message(uint8_t* payload[], uint32_t* payload_len, const char* pro
       break;
     case MIB_DLBAND:
       rnti = SRSRAN_PRNTI;
-      tti = 200;
+      tti = 990;
       print_generation_banner("dl_bw=n6");
       *payload_len = 0;
       break;

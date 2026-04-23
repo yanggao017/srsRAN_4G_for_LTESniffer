@@ -265,7 +265,7 @@ int main(int argc, char** argv)
            srsran_convert_power_to_dB(results[i].power));
   }
 
-  printf("\nBye\n");
+  //printf("\nBye\n");
 
   srsran_ue_cellsearch_free(&cs);
   srsran_rf_close(&rf);

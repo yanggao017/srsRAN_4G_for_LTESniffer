@@ -66,18 +66,6 @@ struct cells results[1024];
 float rf_gain = 70.0;
 char* rf_args = "";
 char* rf_dev  = "";
-int common_lte_fdd_bands[] = {
-  1,   // 2100 MHz, 全球通用
-  3,   // 1800 MHz, 中国/欧洲主流
-  7,   // 2600 MHz, 高容量
-  8,   // 900 MHz, 覆盖好
-  20,  // 800 MHz, 欧洲/中国移动 FDD 补盲
-  28,  // 700 MHz, 电信+广电，黄金频段
-  5,   // 850 MHz, 中国电信
-  4,   // AWS 1700/2100, 北美
-  12,  // 700 MHz 下行, 北美
-};
-#define NUM_FDD_BANDS (sizeof(common_lte_fdd_bands) / sizeof(common_lte_fdd_bands[0]))
 
 void usage(char* prog)
 {
@@ -125,10 +113,10 @@ void parse_args(int argc, char** argv)
         exit(-1);
     }
   }
-  /*if (band == -1) {
+  if (band == -1) {
     usage(argv[0]);
     exit(-1);
-  }*/
+  }
 }
 
 int srsran_rf_recv_wrapper(void* h, void* data, uint32_t nsamples, srsran_timestamp_t* t)
@@ -187,7 +175,11 @@ int main(int argc, char** argv)
   // Supress RF messages
   srsran_rf_suppress_stdout(&rf);
 
-  
+  nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, MAX_EARFCN);
+  if (nof_freqs < 0) {
+    ERROR("Error getting EARFCN list");
+    exit(-1);
+  }
 
   sigset_t sigset;
   sigemptyset(&sigset);
@@ -211,22 +203,14 @@ int main(int argc, char** argv)
                              rf_info->max_rx_gain,
                              cell_detect_config.init_agc);
   }
-  for (int i = 0; i < NUM_FDD_BANDS; i++) {
-    band = common_lte_fdd_bands[i];
-    printf("[%d/%d] 正在处理 Band %d...\n", i + 1, NUM_FDD_BANDS, band);
 
-  nof_freqs = srsran_band_get_fd_band(band, channels, earfcn_start, earfcn_end, MAX_EARFCN);
-  if (nof_freqs < 0) {
-    ERROR("Error getting EARFCN list");
-    exit(-1);
-  }
   for (freq = 0; freq < nof_freqs && !go_exit; freq++) {
     /* set rf_freq */
     srsran_rf_set_rx_freq(&rf, 0, (double)channels[freq].fd * MHZ);
     INFO("Set rf_freq to %.3f MHz", (double)channels[freq].fd * MHZ / 1000000);
 
     printf(
-        "[%3d/%d]: BAND:%d EARFCN %d Freq. %.2f MHz looking for PSS.\n", freq, nof_freqs, band, channels[freq].id, channels[freq].fd);
+        "[%3d/%d]: EARFCN %d Freq. %.2f MHz looking for PSS.\n", freq, nof_freqs, channels[freq].id, channels[freq].fd);
     fflush(stdout);
 
     if (SRSRAN_VERBOSE_ISINFO()) {
@@ -281,7 +265,7 @@ int main(int argc, char** argv)
            srsran_convert_power_to_dB(results[i].power));
   }
 
-  printf("\nBye\n");
+  //printf("\nBye\n");
 
   srsran_ue_cellsearch_free(&cs);
   srsran_rf_close(&rf);

@@ -354,7 +354,7 @@ static void put_refs(srsran_enb_dl_t* q)
     }
   }
 }
-[[maybe_unused]]
+
 static void put_mib(srsran_enb_dl_t* q)
 {
   uint8_t bch_payload[SRSRAN_BCH_PAYLOAD_LEN];
@@ -380,7 +380,7 @@ void srsran_enb_dl_put_base(srsran_enb_dl_t* q, srsran_dl_sf_cfg_t* dl_sf)
   clear_sf(q);
   put_sync(q);
   put_refs(q);
-  put_mib(q);
+  //put_mib(q);
   put_pcfich(q);
 }
 
