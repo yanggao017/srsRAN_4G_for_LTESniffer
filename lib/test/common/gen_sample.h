@@ -293,7 +293,7 @@ int gen_paging_sysinfmod(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len
     return -1;
   }
   int len = bref.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  //srsran_vec_fprint_byte(stdout, buffer, len);
   *msg_len = len;
   return 0;
 }
@@ -327,7 +327,7 @@ int gen_paging_etws(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) {
     return -1;
   }
   int len = bref.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  //srsran_vec_fprint_byte(stdout, buffer, len);
   *msg_len = len;
   return 0;
 }
@@ -349,7 +349,7 @@ int gen_paging_imsi(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len, uin
     return -1;
   }
   int len = bref.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  //srsran_vec_fprint_byte(stdout, buffer, len);
   *msg_len = len;
   return 0;
 }
@@ -536,7 +536,7 @@ int gen_sib1_original(uint8_t* buffer, uint32_t buffer_len, uint32_t* msg_len) {
     return -1;
   }
   int len = bref_ret.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  //srsran_vec_fprint_byte(stdout, buffer, len);
   *msg_len = len;
   return 0;
 }
@@ -774,7 +774,7 @@ static int pack_etws_sys_info(uint8_t* buffer, uint32_t buffer_len, uint32_t* ms
   }
 
   int len = bref.distance_bytes(buffer);
-  srsran_vec_fprint_byte(stdout, buffer, len);
+  //srsran_vec_fprint_byte(stdout, buffer, len);
 
   json_writer js;
   sys_info.to_json(js);

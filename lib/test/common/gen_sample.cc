@@ -121,10 +121,7 @@ void print_generation_banner(const char* extra = nullptr)
 void print_payload_hex(const uint8_t* data, uint32_t len)
 {
   printf("[msg] hex=");
-  for (uint32_t i = 0; i < len; ++i) {
-    printf("%02x", data[i]);
-  }
-  printf("\n");
+  srsran_vec_fprint_byte(stdout, data, len);
 }
 
 const char* mib_dl_bw_to_string(uint32_t nof_prb)
