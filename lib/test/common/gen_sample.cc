@@ -762,15 +762,39 @@ int read_cell_config_from_json() {
       cell.nof_prb = j.at("PRB").get<uint32_t>();
       std::string phich_length = j.at("PHICH Length").get<std::string>();
       cell.phich_length = (phich_length == "normal") ? SRSRAN_PHICH_NORM : SRSRAN_PHICH_EXT;
-      int phich_resources = j.at("PHICH Resources").get<int>();
-      switch (phich_resources) {
-          case 0:  cell.phich_resources = SRSRAN_PHICH_R_1_6;    break;
-          case 1:  cell.phich_resources = SRSRAN_PHICH_R_1_2;  break;
-          case 2:  cell.phich_resources = SRSRAN_PHICH_R_1;  break;
-          case 3:  cell.phich_resources = SRSRAN_PHICH_R_2;  break;
-          default:
+      const auto& phich_field = j.at("PHICH Resources");
+      if (phich_field.is_string()) {
+          std::string phich_resources = phich_field.get<std::string>();
+          if (phich_resources == "oneSixth") {
+              cell.phich_resources = SRSRAN_PHICH_R_1_6;
+          } else if (phich_resources == "half") {
+              cell.phich_resources = SRSRAN_PHICH_R_1_2;
+          } else if (phich_resources == "one") {
+              cell.phich_resources = SRSRAN_PHICH_R_1;
+          } else if (phich_resources == "two") {
+              cell.phich_resources = SRSRAN_PHICH_R_2;
+          } else {
               std::cerr << "[ERROR] Invalid PHICH Resources value: " << phich_resources << "\n";
               return -1;
+          }
+      } else {
+          int phich_resources = phich_field.get<int>();
+          if (phich_resources == 0) {
+              cell.phich_resources = SRSRAN_PHICH_R_1_6;
+          } else if (phich_resources == 1) {
+              cell.phich_resources = SRSRAN_PHICH_R_1_2;
+          } else if (phich_resources == 2) {
+              cell.phich_resources = SRSRAN_PHICH_R_1;
+          } else if (phich_resources == 3) {
+              cell.phich_resources = SRSRAN_PHICH_R_2;
+          } else if (phich_resources == 4) {
+              cell.phich_resources = SRSRAN_PHICH_R_1;
+          } else if (phich_resources == 8) {
+              cell.phich_resources = SRSRAN_PHICH_R_2;
+          } else {
+              std::cerr << "[ERROR] Invalid PHICH Resources value: " << phich_resources << "\n";
+              return -1;
+          }
       }
 
   } catch (const json::out_of_range& e) {
